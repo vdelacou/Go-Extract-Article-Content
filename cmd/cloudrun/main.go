@@ -70,6 +70,12 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Starting scrape for: %s\n", targetURL)
 
+	// Detect if request is coming through API Gateway
+	// API Gateway sets X-Google-Backend header, or we check environment variable
+	// For maximum reliability, set GATEWAY_MODE=true environment variable in Cloud Run
+	isGatewayRequest := os.Getenv("GATEWAY_MODE") == "true" ||
+		r.Header.Get("X-Google-Backend") != ""
+
 	// Calculate timeout (Cloud Run has 5 minute max)
 	timeoutStr := r.URL.Query().Get("timeout")
 	timeoutMs := 300000 // Default 5 minutes
@@ -79,8 +85,14 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Cap at 4 minutes to be safe
-	if timeoutMs > 240000 {
+	// If behind API Gateway, cap at 25s (API Gateway max deadline is 30s)
+	if isGatewayRequest && timeoutMs > 25000 {
+		timeoutMs = 25000
+		fmt.Printf("Request via API Gateway - timeout capped at 25000ms\n")
+	}
+
+	// Cap at 4 minutes to be safe for direct Cloud Run requests
+	if !isGatewayRequest && timeoutMs > 240000 {
 		timeoutMs = 240000
 	}
 	if timeoutMs < 1000 {
@@ -90,6 +102,13 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 	// Create context with timeout
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
+
+	// Log time budget information for debugging
+	if isGatewayRequest {
+		fmt.Printf("API Gateway request: timeout=%dms, remaining budget=%dms\n", timeoutMs, timeoutMs)
+	} else {
+		fmt.Printf("Direct request: timeout=%dms\n", timeoutMs)
+	}
 
 	start := time.Now()
 

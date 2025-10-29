@@ -1,0 +1,15 @@
+# Explicitly include important directories
+# Cloud Build will respect .gitignore by default
+# This file ensures critical build directories are NOT excluded
+
+# DO NOT ignore these patterns (use negation)
+# The default behavior already includes tracked files
+# This file is mainly a safeguard
+
+# Only explicitly exclude truly unnecessary files for build
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+

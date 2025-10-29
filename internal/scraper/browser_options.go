@@ -51,8 +51,34 @@ func BuildChromeOptions(opts BrowserOptions) []chromedp.ExecAllocatorOption {
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-web-security", true),
-		chromedp.Flag("disable-features", "VizDisplayCompositor"),
+		chromedp.Flag("disable-features", "VizDisplayCompositor,IsolateOrigins,site-per-process"),
 		chromedp.WindowSize(opts.WindowWidth, opts.WindowHeight),
+		// Enhanced stealth flags
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.Flag("exclude-switches", "enable-automation"),
+		chromedp.Flag("disable-infobars", true),
+		chromedp.Flag("disable-default-apps", true),
+		chromedp.Flag("disable-background-networking", true),
+		chromedp.Flag("disable-background-timer-throttling", true),
+		chromedp.Flag("disable-backgrounding-occluded-windows", true),
+		chromedp.Flag("disable-breakpad", true),
+		chromedp.Flag("disable-client-side-phishing-detection", true),
+		chromedp.Flag("disable-component-update", true),
+		chromedp.Flag("disable-domain-reliability", true),
+		chromedp.Flag("disable-hang-monitor", true),
+		chromedp.Flag("disable-ipc-flooding-protection", true),
+		chromedp.Flag("disable-popup-blocking", true),
+		chromedp.Flag("disable-prompt-on-repost", true),
+		chromedp.Flag("disable-renderer-backgrounding", true),
+		chromedp.Flag("disable-sync", true),
+		chromedp.Flag("disable-translate", true),
+		chromedp.Flag("disable-wp-input-check", true),
+		chromedp.Flag("disable-wp-input-validation", true),
+		chromedp.Flag("force-color-profile", "srgb"),
+		chromedp.Flag("metrics-recording-only", true),
+		chromedp.Flag("safebrowsing-disable-auto-update", true),
+		chromedp.Flag("password-store", "basic"),
+		chromedp.Flag("use-mock-keychain", true),
 	)
 
 	// Add user agent if provided
@@ -107,6 +133,35 @@ func GetRequestBlockingScript(opts BrowserOptions) string {
 			}
 			return originalOpen.apply(this, [method, url, ...args]);
 		};
+		
+		// Anti-detection: Hide webdriver property (ALWAYS, not just in optimized mode)
+		Object.defineProperty(navigator, 'webdriver', {
+			get: () => false,
+			configurable: true
+		});
+		
+		// Additional stealth measures
+		Object.defineProperty(navigator, 'plugins', {
+			get: () => [1, 2, 3, 4, 5]
+		});
+		
+		// Override permissions
+		const originalQuery = window.navigator.permissions.query;
+		window.navigator.permissions.query = (parameters) => (
+			parameters.name === 'notifications' ?
+				Promise.resolve({ state: Notification.permission }) :
+				originalQuery(parameters)
+		);
+		
+		// Chrome object
+		window.chrome = {
+			runtime: {},
+		};
+		
+		// Override languages
+		Object.defineProperty(navigator, 'languages', {
+			get: () => ['en-US', 'en']
+		});
 	`
 
 	if opts.Optimized {
@@ -120,11 +175,6 @@ func GetRequestBlockingScript(opts BrowserOptions) string {
 			}
 			return element;
 		};
-		
-		// Hide webdriver detection
-		Object.defineProperty(navigator, 'webdriver', {
-			get: () => false
-		});
 		`
 	}
 

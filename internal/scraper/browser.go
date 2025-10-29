@@ -96,12 +96,97 @@ func (b *BrowserClient) navigateAndExtract(ctx context.Context, targetURL string
 	var html string
 	var finalURL string
 
+	// Calculate remaining time to adjust challenge wait
+	remainingTime := time.Duration(0)
+	if deadline, ok := ctx.Deadline(); ok {
+		remainingTime = time.Until(deadline)
+		if remainingTime < 0 {
+			remainingTime = 0
+		}
+	} else {
+		// No deadline, use default values
+		remainingTime = 60 * time.Second
+	}
+
+	// Adjust challenge wait times based on remaining budget
+	var initialSleep time.Duration
+	var maxChallengeWait time.Duration
+
+	if remainingTime < 25*time.Second {
+		// Time-limited (gateway request): aggressive wait
+		initialSleep = 1 * time.Second
+		maxChallengeWait = 8 * time.Second
+	} else if remainingTime < 60*time.Second {
+		// Medium time budget: moderate wait
+		initialSleep = 2 * time.Second
+		maxChallengeWait = 12 * time.Second
+	} else {
+		// Full time budget: default wait
+		initialSleep = 3 * time.Second
+		maxChallengeWait = 15 * time.Second
+	}
+
+	// Ensure challenge wait doesn't exceed remaining time (with safety margin)
+	if maxChallengeWait > remainingTime-initialSleep-2*time.Second {
+		maxChallengeWait = remainingTime - initialSleep - 2*time.Second
+		if maxChallengeWait < 1*time.Second {
+			maxChallengeWait = 1 * time.Second
+		}
+	}
+
 	err := chromedp.Run(ctx, chromedp.Tasks{
 		// Navigate to the URL
 		chromedp.Navigate(targetURL),
 
 		// Wait for network to be idle
 		chromedp.WaitReady("body"),
+
+		// Wait for potential challenge to resolve (with timeout)
+		chromedp.Sleep(initialSleep),
+
+		// Check if challenge resolved by waiting for content to appear
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			// Use dynamically calculated challenge wait time
+			// But also respect the parent context deadline
+			challengeCtx, cancel := context.WithTimeout(ctx, maxChallengeWait)
+			defer cancel()
+
+			var previousHTML string
+			var challengeDetected bool
+			for {
+				select {
+				case <-ctx.Done():
+					// Parent context expired, stop immediately
+					return nil
+				case <-challengeCtx.Done():
+					// Challenge wait timeout - proceed with whatever we have
+					return nil
+				default:
+					var bodyHTML string
+					if err := chromedp.Run(ctx, chromedp.Tasks{
+						chromedp.OuterHTML("body", &bodyHTML),
+					}); err == nil {
+						isChallengePage := b.LooksLikeChallengePage(bodyHTML)
+						if isChallengePage {
+							challengeDetected = true
+							previousHTML = bodyHTML
+						} else if challengeDetected {
+							// Challenge was detected earlier but now it's resolved
+							if previousHTML != bodyHTML {
+								return nil
+							}
+						} else {
+							// No challenge detected at all, check if content has changed
+							if previousHTML != "" && previousHTML != bodyHTML {
+								return nil
+							}
+							previousHTML = bodyHTML
+						}
+					}
+					time.Sleep(500 * time.Millisecond)
+				}
+			}
+		}),
 
 		// Get the final URL after redirects
 		chromedp.Location(&finalURL),
@@ -121,6 +206,24 @@ func (b *BrowserClient) navigateAndExtract(ctx context.Context, targetURL string
 func (b *BrowserClient) LooksLikeCFBlock(html string) bool {
 	htmlLower := strings.ToLower(html)
 	return b.regexes["cfBlock"].MatchString(htmlLower)
+}
+
+// LooksLikeChallengePage checks if HTML content indicates a challenge page
+func (b *BrowserClient) LooksLikeChallengePage(html string) bool {
+	htmlLower := strings.ToLower(html)
+	challengePatterns := []string{
+		"verifying you are human",
+		"verify you are human",
+		"checking your browser",
+		"please wait",
+		"this may take a few seconds",
+	}
+	for _, pattern := range challengePatterns {
+		if strings.Contains(htmlLower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // GenerateAlternateURLs creates alternative URLs for AMP/mobile fallback

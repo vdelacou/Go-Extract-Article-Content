@@ -99,6 +99,6 @@ func CompileRegexes() map[string]*regexp.Regexp {
 		"ogHeight":          regexp.MustCompile(`<meta[^>]*property=["']og:image:height["'][^>]*content=["']([^"']+)["']`),
 		"articleTag":        regexp.MustCompile(`<(article|main)[\s>]`),
 		"closeArticleTag":   regexp.MustCompile(`</(article|main)>`),
-		"cfBlock":           regexp.MustCompile(`(attention required|cloudflare ray id|what can i do to resolve this\?|why have i been blocked\?|performance & security by cloudflare)`),
+		"cfBlock":           regexp.MustCompile(`(attention required|cloudflare ray id|what can i do to resolve this\?|why have i been blocked\?|performance & security by cloudflare|verifying you are human|verify you are human|checking your browser|please wait while we verify|this may take a few seconds)`),
 	}
 }

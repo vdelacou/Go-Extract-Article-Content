@@ -63,6 +63,10 @@ GET /?url=TARGET_URL&key=YOUR_API_KEY
 
 - `url` (required): The URL to scrape
 - `key` (required): Your API key for authentication
+- `timeout` (optional): Request timeout in milliseconds. **Important timeout limits:**
+  - **API Gateway requests**: Maximum 25000ms (25 seconds). Requests via API Gateway are automatically capped at 25s.
+  - **Direct Cloud Run requests**: Maximum 240000ms (4 minutes)
+  - Default: 300000ms (5 minutes) for direct requests, 25000ms for gateway requests
 
 ### Example Request
 
@@ -115,7 +119,9 @@ Create and manage API keys using the provided script:
 - `401` - Invalid or missing API key (returned by API Gateway)
 - `451` - Blocked by Cloudflare/site protection (returned by Cloud Run service)
 - `500` - Scraping failed (returned by Cloud Run service)
-- `504` - Scrape timeout (returned by Cloud Run service)
+- `504` - Upstream request timeout (returned by API Gateway) or scrape timeout (returned by Cloud Run service)
+
+**Note about 504 errors:** If you're using API Gateway and see 504 errors, ensure your `timeout` parameter is ≤ 25000ms. For longer scraping operations (up to 4 minutes), use the direct Cloud Run service URL instead of the API Gateway URL.
 
 ## 🏆 Performance Comparison
 
@@ -274,10 +280,17 @@ docker run --rm your-image:latest /usr/bin/chromium-browser --version
 --memory 4Gi
 ```
 
-**3. Timeout errors**
+**3. Timeout errors (504 upstream request timeout)**
 ```bash
-# Increase timeout in deploy.sh
---timeout 600
+# For API Gateway requests:
+# - Maximum timeout is 25000ms (25 seconds)
+# - Use timeout parameter: ?timeout=25000
+# Example: curl "https://gateway-url/?url=https://example.com&key=KEY&timeout=25000"
+
+# For direct Cloud Run requests (longer scrapes):
+# - Maximum timeout is 240000ms (4 minutes)
+# - Use the Cloud Run service URL directly instead of API Gateway
+# - Increase timeout in deploy.sh: --timeout 600
 ```
 
 **4. Authentication errors**

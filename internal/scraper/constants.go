@@ -78,4 +78,9 @@ var CloudflarePatterns = []string{
 	"what can i do to resolve this?",
 	"why have i been blocked?",
 	"performance & security by cloudflare",
+	"verifying you are human",
+	"verify you are human",
+	"checking your browser",
+	"please wait while we verify",
+	"this may take a few seconds",
 }

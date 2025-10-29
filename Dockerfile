@@ -16,6 +16,9 @@ RUN go mod download
 # Copy source code
 COPY . .
 
+# Verify cmd directory exists (debug step)
+RUN ls -la /app/cmd/cloudrun/ || (echo "ERROR: cmd/cloudrun not found" && ls -la /app/ && exit 1)
+
 # Build the Go binary with size optimization
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o main ./cmd/cloudrun
 

@@ -88,12 +88,20 @@ gcloud services enable servicecontrol.googleapis.com
 # Create API Gateway config
 echo -e "${BLUE}Creating API Gateway configuration...${NC}"
 # Substitute the Cloud Run service URL in the API Gateway config
-sed "s/\${CLOUD_RUN_SERVICE_URL}/$SERVICE_URL/g" api-gateway-config.yaml > api-gateway-config-temp.yaml
-gcloud api-gateway api-configs create scraper-config-v1 \
+# Use | as delimiter to avoid issues with URL slashes
+sed "s|\${CLOUD_RUN_SERVICE_URL}|$SERVICE_URL|g" api-gateway-config.yaml > api-gateway-config-temp.yaml
+
+# Generate unique config version name with timestamp
+CONFIG_VERSION="scraper-config-$(date +%Y%m%d-%H%M%S)"
+echo -e "${BLUE}Creating API config version: $CONFIG_VERSION${NC}"
+
+# Create new API config version
+gcloud api-gateway api-configs create $CONFIG_VERSION \
     --api=extract-html-scraper-api \
     --openapi-spec=api-gateway-config-temp.yaml \
     --backend-auth-service-account=cr-gw-invoker@$PROJECT_ID.iam.gserviceaccount.com \
-    --project=$PROJECT_ID || echo "Config already exists, creating new version..."
+    --project=$PROJECT_ID
+
 rm -f api-gateway-config-temp.yaml
 
 # Create or update API
@@ -101,13 +109,27 @@ echo -e "${BLUE}Creating API...${NC}"
 gcloud api-gateway apis create extract-html-scraper-api \
     --project=$PROJECT_ID || echo "API already exists"
 
-# Deploy gateway
+# Deploy gateway (update to use new config version)
 echo -e "${BLUE}Deploying API Gateway...${NC}"
-gcloud api-gateway gateways create extract-html-scraper-gateway \
-    --api=extract-html-scraper-api \
-    --api-config=scraper-config-v1 \
+if gcloud api-gateway gateways describe extract-html-scraper-gateway \
     --location=$REGION \
-    --project=$PROJECT_ID || echo "Gateway exists, updating..."
+    --project=$PROJECT_ID &>/dev/null; then
+    # Gateway exists - update it with new config
+    echo -e "${BLUE}Updating existing gateway with new config version...${NC}"
+    gcloud api-gateway gateways update extract-html-scraper-gateway \
+        --api=extract-html-scraper-api \
+        --api-config=$CONFIG_VERSION \
+        --location=$REGION \
+        --project=$PROJECT_ID
+else
+    # Gateway doesn't exist - create it
+    echo -e "${BLUE}Creating new gateway...${NC}"
+    gcloud api-gateway gateways create extract-html-scraper-gateway \
+        --api=extract-html-scraper-api \
+        --api-config=$CONFIG_VERSION \
+        --location=$REGION \
+        --project=$PROJECT_ID
+fi
 
 # Get gateway URL
 GATEWAY_URL=$(gcloud api-gateway gateways describe extract-html-scraper-gateway \

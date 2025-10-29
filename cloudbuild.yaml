@@ -1,5 +1,5 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-f', 'Dockerfile.gcp', '-t', 'gcr.io/${_PROJECT_ID}/extract-html-scraper', '.']
+    args: ['build', '-f', 'Dockerfile', '-t', 'gcr.io/${_PROJECT_ID}/extract-html-scraper', '.']
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'gcr.io/${_PROJECT_ID}/extract-html-scraper']

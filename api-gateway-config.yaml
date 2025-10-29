@@ -35,3 +35,4 @@ paths:
       x-google-backend:
         address: ${CLOUD_RUN_SERVICE_URL}
         protocol: h2
+        deadline: 30.0
