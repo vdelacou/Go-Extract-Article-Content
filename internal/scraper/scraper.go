@@ -65,14 +65,26 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 	var browserTimeout time.Duration
 
 	if isTimeLimited {
-		// For gateway requests (< 25s), use aggressive timeouts
-		// Reserve 1-2s buffer for overhead
-		availableTime := remainingTime - 2*time.Second
-		httpTimeout = adjustTimeoutForBudget(10*time.Second, availableTime, 0.4)
-		// Browser phase gets remaining time after HTTP (with overhead)
+		// For gateway requests (< 25s), use conservative timeouts
+		// Reserve 4s buffer for: overhead (2s) + extraction (1s) + processing (1s)
+		availableTime := remainingTime - 4*time.Second
+
+		// Reduce HTTP timeout to 8s for more conservative budget
+		httpTimeout = adjustTimeoutForBudget(8*time.Second, availableTime, 0.38)
+
+		// Browser phase needs: startup (2s) + challenge (6s) + navigation (2s) + extraction (1s) = 11s minimum
+		// Reserve 1s overhead between phases
 		browserBudget := availableTime - httpTimeout - 1*time.Second
-		browserTimeout = adjustTimeoutForBudget(18*time.Second, browserBudget, 0.7)
-		fmt.Printf("Time-limited mode: HTTP=%v, Browser=%v (remaining=%v)\n", httpTimeout, browserTimeout, remainingTime)
+
+		// Only allocate browser timeout if we have sufficient budget (12s minimum required)
+		if browserBudget >= 12*time.Second {
+			browserTimeout = adjustTimeoutForBudget(12*time.Second, browserBudget, 0.9)
+			fmt.Printf("Time-limited mode: HTTP=%v, Browser=%v (remaining=%v, budget=%v)\n", httpTimeout, browserTimeout, remainingTime, browserBudget)
+		} else {
+			// Insufficient budget for browser phase
+			browserTimeout = 0
+			fmt.Printf("Time-limited mode: HTTP=%v, Browser=SKIPPED (insufficient budget: %v, need 12s)\n", httpTimeout, browserBudget)
+		}
 	} else {
 		// For direct requests, use full timeouts
 		httpTimeout = HTTPTimeout
@@ -92,10 +104,20 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 
 	// Check remaining time before entering browser phase
 	remainingAfterHTTP := calculateRemainingTime(ctx)
-	if isTimeLimited && remainingAfterHTTP < 5*time.Second {
-		// Insufficient time for browser phase, skip it
-		fmt.Printf("Skipping browser phase: only %v remaining\n", remainingAfterHTTP)
-		return models.ScrapeResponse{}, fmt.Errorf("scraping failed: insufficient time remaining")
+	if isTimeLimited {
+		// Need at least 12s for browser phase (challenge 6s + operation 6s)
+		if remainingAfterHTTP < 12*time.Second {
+			fmt.Printf("Skipping browser phase: only %v remaining (need 12s for challenge+operation)\n", remainingAfterHTTP)
+			return models.ScrapeResponse{}, fmt.Errorf("scraping failed: insufficient time remaining")
+		}
+
+		// Double-check browser timeout was allocated
+		if browserTimeout == 0 || browserTimeout < 6*time.Second {
+			fmt.Printf("Skipping browser phase: timeout too short (%v)\n", browserTimeout)
+			return models.ScrapeResponse{}, fmt.Errorf("scraping failed: insufficient time remaining")
+		}
+
+		fmt.Printf("Entering browser phase: %v remaining, timeout=%v\n", remainingAfterHTTP, browserTimeout)
 	}
 
 	// Phase 2: Browser fallback

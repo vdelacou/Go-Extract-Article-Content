@@ -113,9 +113,9 @@ func (b *BrowserClient) navigateAndExtract(ctx context.Context, targetURL string
 	var maxChallengeWait time.Duration
 
 	if remainingTime < 25*time.Second {
-		// Time-limited (gateway request): aggressive wait
+		// Time-limited (gateway request): reduced wait
 		initialSleep = 1 * time.Second
-		maxChallengeWait = 8 * time.Second
+		maxChallengeWait = 5 * time.Second // Reduced from 8s to 5s
 	} else if remainingTime < 60*time.Second {
 		// Medium time budget: moderate wait
 		initialSleep = 2 * time.Second
@@ -126,12 +126,23 @@ func (b *BrowserClient) navigateAndExtract(ctx context.Context, targetURL string
 		maxChallengeWait = 15 * time.Second
 	}
 
-	// Ensure challenge wait doesn't exceed remaining time (with safety margin)
-	if maxChallengeWait > remainingTime-initialSleep-2*time.Second {
-		maxChallengeWait = remainingTime - initialSleep - 2*time.Second
+	// Ensure challenge wait doesn't exceed remaining time (with increased safety margin)
+	safetyMargin := 2 * time.Second
+	if remainingTime < 25*time.Second {
+		safetyMargin = 3 * time.Second // Increased from 2s to 3s for gateway requests
+	}
+
+	if maxChallengeWait > remainingTime-initialSleep-safetyMargin {
+		maxChallengeWait = remainingTime - initialSleep - safetyMargin
 		if maxChallengeWait < 1*time.Second {
 			maxChallengeWait = 1 * time.Second
 		}
+	}
+
+	// Log challenge wait configuration for debugging
+	if remainingTime < 25*time.Second {
+		fmt.Printf("Challenge wait config: initial=%v, max=%v, remaining=%v, margin=%v\n",
+			initialSleep, maxChallengeWait, remainingTime, safetyMargin)
 	}
 
 	err := chromedp.Run(ctx, chromedp.Tasks{
@@ -153,38 +164,62 @@ func (b *BrowserClient) navigateAndExtract(ctx context.Context, targetURL string
 
 			var previousHTML string
 			var challengeDetected bool
+			checkCount := 0
 			for {
+				// Check parent context first (more frequent checks)
 				select {
 				case <-ctx.Done():
 					// Parent context expired, stop immediately
-					return nil
-				case <-challengeCtx.Done():
-					// Challenge wait timeout - proceed with whatever we have
+					fmt.Printf("Challenge wait: parent context expired\n")
 					return nil
 				default:
-					var bodyHTML string
-					if err := chromedp.Run(ctx, chromedp.Tasks{
-						chromedp.OuterHTML("body", &bodyHTML),
-					}); err == nil {
-						isChallengePage := b.LooksLikeChallengePage(bodyHTML)
-						if isChallengePage {
-							challengeDetected = true
-							previousHTML = bodyHTML
-						} else if challengeDetected {
-							// Challenge was detected earlier but now it's resolved
-							if previousHTML != bodyHTML {
-								return nil
-							}
-						} else {
-							// No challenge detected at all, check if content has changed
-							if previousHTML != "" && previousHTML != bodyHTML {
-								return nil
-							}
-							previousHTML = bodyHTML
-						}
-					}
-					time.Sleep(500 * time.Millisecond)
 				}
+
+				// Check challenge timeout
+				select {
+				case <-challengeCtx.Done():
+					// Challenge wait timeout - proceed with whatever we have
+					if challengeDetected {
+						fmt.Printf("Challenge wait: timeout after detecting challenge\n")
+					}
+					return nil
+				default:
+				}
+
+				// Periodic check every 500ms (but also check context more frequently)
+				checkCount++
+				var bodyHTML string
+				if err := chromedp.Run(ctx, chromedp.Tasks{
+					chromedp.OuterHTML("body", &bodyHTML),
+				}); err == nil {
+					// Re-check parent context after DOM operation
+					select {
+					case <-ctx.Done():
+						fmt.Printf("Challenge wait: context expired during check\n")
+						return nil
+					default:
+					}
+
+					isChallengePage := b.LooksLikeChallengePage(bodyHTML)
+					if isChallengePage {
+						challengeDetected = true
+						previousHTML = bodyHTML
+					} else if challengeDetected {
+						// Challenge was detected earlier but now it's resolved
+						if previousHTML != bodyHTML {
+							fmt.Printf("Challenge wait: challenge resolved after %d checks\n", checkCount)
+							return nil
+						}
+					} else {
+						// No challenge detected at all, check if content has changed
+						if previousHTML != "" && previousHTML != bodyHTML {
+							fmt.Printf("Challenge wait: content changed after %d checks\n", checkCount)
+							return nil
+						}
+						previousHTML = bodyHTML
+					}
+				}
+				time.Sleep(500 * time.Millisecond)
 			}
 		}),
 
