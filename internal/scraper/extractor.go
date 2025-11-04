@@ -1,6 +1,7 @@
 package scraper
 
 import (
+	"fmt"
 	"strings"
 
 	"extract-html-scraper/internal/models"
@@ -321,5 +322,213 @@ func (ae *ArticleExtractor) ExtractArticleSimple(html, baseURL string) models.Sc
 		Description: ae.sanitizeText(description),
 		Content:     ae.sanitizeText(content),
 		Images:      images,
+	}
+}
+
+// ExtractArticleWithMultipleStrategies tries multiple extraction strategies and returns the best result
+// Strategies tried in order:
+// 1. JSON-LD structured data extraction (fastest, most reliable for news sites)
+// 2. Full extraction with readability (ExtractArticle)
+// 3. Simple extraction (ExtractArticleSimple)
+// 4. Metadata-only extraction (at least get title/description)
+// Returns the result with highest quality score
+func (ae *ArticleExtractor) ExtractArticleWithMultipleStrategies(html, baseURL string) models.ScrapeResponse {
+	var results []models.ScrapeResponse
+	var strategies []string
+
+	// Parse HTML once for all strategies
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		fmt.Printf("Failed to parse HTML: %v\n", err)
+		return models.ScrapeResponse{Images: []string{}}
+	}
+
+	// Strategy 0: Try JSON-LD structured data first (best for news sites like SCMP)
+	fmt.Printf("Extraction strategy 0: JSON-LD structured data\n")
+	if headline, body, description, found := ExtractJSONLD(doc); found {
+		// Extract images using the optimized image extractor
+		imageExtractor := NewImageExtractor()
+		images := imageExtractor.ExtractImagesFromHTML(html, baseURL)
+
+		// If articleBody is available, use it
+		content := body
+		if content == "" {
+			// Fallback to description if no body
+			content = description
+		}
+
+		// Calculate quality
+		quality := ScoreContentQuality(content, html)
+
+		result0 := models.ScrapeResponse{
+			Title:       ae.sanitizeText(headline),
+			Description: ae.sanitizeText(description),
+			Content:     ae.sanitizeText(content),
+			Images:      images,
+			Quality: models.Quality{
+				Score:              quality.Score + 10, // Bonus for structured data
+				TextToHTMLRatio:    quality.TextToHTMLRatio,
+				ParagraphCount:     quality.ParagraphCount,
+				AvgParagraphLength: quality.AvgParagraphLength,
+				HasHeaders:         quality.HasHeaders,
+				LinkDensity:        quality.LinkDensity,
+				WordCount:          quality.WordCount,
+			},
+		}
+		results = append(results, result0)
+		strategies = append(strategies, "jsonld")
+		fmt.Printf("Strategy 0 result: title=%d chars, content=%d chars, quality=%d\n",
+			len(result0.Title), len(result0.Content), result0.Quality.Score)
+
+		// If JSON-LD has good content, might be sufficient, but continue for comparison
+	}
+
+	// Strategy 1: Full extraction with readability
+	fmt.Printf("Extraction strategy 1: Full extraction with readability\n")
+	result1 := ae.ExtractArticle(html, baseURL)
+	results = append(results, result1)
+	strategies = append(strategies, "readability")
+	fmt.Printf("Strategy 1 result: title=%d chars, content=%d chars, quality=%d\n",
+		len(result1.Title), len(result1.Content), result1.Quality.Score)
+
+	// Strategy 2: Simple extraction (fallback if readability fails)
+	if len(result1.Content) == 0 || len(result1.Title) == 0 || result1.Quality.Score < 30 {
+		fmt.Printf("Extraction strategy 2: Simple extraction\n")
+		result2 := ae.ExtractArticleSimple(html, baseURL)
+		results = append(results, result2)
+		strategies = append(strategies, "simple")
+		fmt.Printf("Strategy 2 result: title=%d chars, content=%d chars\n",
+			len(result2.Title), len(result2.Content))
+	}
+
+	// Strategy 3: Metadata-only (last resort - at least get title/description)
+	allEmpty := true
+	for _, r := range results {
+		if len(r.Title) > 0 || len(r.Content) > 0 {
+			allEmpty = false
+			break
+		}
+	}
+	if allEmpty {
+		fmt.Printf("Extraction strategy 3: Metadata-only extraction\n")
+		result3 := ae.ExtractMetadataOnly(html, baseURL)
+		results = append(results, result3)
+		strategies = append(strategies, "metadata-only")
+		fmt.Printf("Strategy 3 result: title=%d chars, description=%d chars\n",
+			len(result3.Title), len(result3.Description))
+	}
+
+	// Select best result based on quality score and content length
+	best := ae.selectBestResult(results, strategies)
+	fmt.Printf("Selected best result: strategy=%s, quality=%d, title=%d chars, content=%d chars\n",
+		best.Strategy, best.Result.Quality.Score, len(best.Result.Title), len(best.Result.Content))
+	return best.Result
+}
+
+// ExtractionResult wraps a result with its strategy name for selection
+type extractionResultWithStrategy struct {
+	Result   models.ScrapeResponse
+	Strategy string
+}
+
+// selectBestResult chooses the best extraction result based on multiple criteria
+func (ae *ArticleExtractor) selectBestResult(results []models.ScrapeResponse, strategies []string) extractionResultWithStrategy {
+	if len(results) == 0 {
+		return extractionResultWithStrategy{
+			Result:   models.ScrapeResponse{Images: []string{}},
+			Strategy: "none",
+		}
+	}
+
+	var best extractionResultWithStrategy
+	bestScore := -1
+
+	for i, result := range results {
+		strategy := "unknown"
+		if i < len(strategies) {
+			strategy = strategies[i]
+		}
+
+		// Calculate composite score: quality score + content bonus
+		score := result.Quality.Score
+
+		// Bonus for having both title and content
+		if len(result.Title) > 0 && len(result.Content) > 0 {
+			score += 20
+		}
+
+		// Bonus for substantial content (more is better, up to a point)
+		contentBonus := len(result.Content) / 100 // 1 point per 100 chars, max 50
+		if contentBonus > 50 {
+			contentBonus = 50
+		}
+		score += contentBonus
+
+		// Prefer readability strategy if scores are close (within 10 points)
+		if strategy == "readability" && score >= bestScore-10 && len(result.Content) > 0 {
+			score += 5 // Small bonus for preferred strategy
+		}
+
+		if score > bestScore || (score == bestScore && len(result.Content) > len(best.Result.Content)) {
+			bestScore = score
+			best = extractionResultWithStrategy{
+				Result:   result,
+				Strategy: strategy,
+			}
+		}
+	}
+
+	return best
+}
+
+// ExtractMetadataOnly extracts only title, description, and metadata (no content body)
+// Useful as last resort when content extraction fails
+func (ae *ArticleExtractor) ExtractMetadataOnly(html, baseURL string) models.ScrapeResponse {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return models.ScrapeResponse{Images: []string{}}
+	}
+
+	// Extract title
+	title := ""
+	doc.Find("title").Each(func(i int, s *goquery.Selection) {
+		title = strings.TrimSpace(s.Text())
+	})
+
+	// Extract description
+	description := ""
+	doc.Find("meta[name='description']").Each(func(i int, s *goquery.Selection) {
+		if content, exists := s.Attr("content"); exists {
+			description = strings.TrimSpace(content)
+		}
+	})
+
+	// Try to get some metadata from readability
+	metadata := ae.extractMetadataFromReadability(html)
+
+	// Extract images
+	imageExtractor := NewImageExtractor()
+	images := imageExtractor.ExtractImagesFromHTML(html, baseURL)
+
+	return models.ScrapeResponse{
+		Title:       ae.sanitizeText(title),
+		Description: ae.sanitizeText(description),
+		Content:     "", // No content body in metadata-only mode
+		Images:      images,
+		Author:      metadata.Author,
+		PublishDate: metadata.PublishDate,
+		Excerpt:     metadata.Excerpt,
+		ReadingTime: metadata.ReadingTime,
+		Language:    metadata.Language,
+		TextLength:  metadata.TextLength,
+		Quality: models.Quality{
+			Score:              10, // Low score since no content
+			TextToHTMLRatio:    0,
+			ParagraphCount:     0,
+			AvgParagraphLength: 0,
+			HasHeaders:          false,
+			LinkDensity:        0,
+			WordCount:          0,
+		},
 	}
 }

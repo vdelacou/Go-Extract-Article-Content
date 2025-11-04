@@ -240,10 +240,19 @@ func (h *HTTPClient) FetchWithAlternates(ctx context.Context, targetURL string) 
 
 // FetchWithAlternatesGroup uses errgroup for better error handling
 func (h *HTTPClient) FetchWithAlternatesGroup(ctx context.Context, targetURL string) (string, string, error) {
+	// Check if parent context is already expired
+	if ctx.Err() != nil {
+		return "", "", fmt.Errorf("HTTP fetch canceled: parent context expired before starting")
+	}
+
 	// Try primary URL first
 	html, err := h.FetchHTML(ctx, targetURL, 0)
-	if err == nil && !h.LooksLikeCFBlock(html) {
+	if err == nil && !h.LooksLikeCFBlock(html) && len(html) > 0 {
+		// Validate HTML has minimum content
+		if len(strings.TrimSpace(html)) > 100 {
 		return html, targetURL, nil
+		}
+		// HTML is too short, likely not a real page - fall through to alternates
 	}
 
 	// Check if we should try alternates
@@ -251,6 +260,10 @@ func (h *HTTPClient) FetchWithAlternatesGroup(ctx context.Context, targetURL str
 		!strings.Contains(err.Error(), "HTTP 406") &&
 		!strings.Contains(err.Error(), "HTTP 451") &&
 		!strings.Contains(err.Error(), "HTTP 5") {
+		// Check if error is due to parent context expiration
+		if ctx.Err() != nil {
+			return "", "", fmt.Errorf("HTTP fetch failed: parent context expired: %w", ctx.Err())
+		}
 		return "", "", err
 	}
 
@@ -260,28 +273,58 @@ func (h *HTTPClient) FetchWithAlternatesGroup(ctx context.Context, targetURL str
 		return "", "", err
 	}
 
+	if len(alternates) == 0 {
+		// Check parent context before returning
+		if ctx.Err() != nil {
+			return "", "", fmt.Errorf("HTTP fetch failed: parent context expired: %w", ctx.Err())
+		}
+		return "", "", fmt.Errorf("HTTP fetch failed: %w", err)
+	}
+
 	// Use errgroup for parallel execution
-	g, ctx := errgroup.WithContext(ctx)
+	// Use errgroup context but check parent context explicitly to avoid canceling parent
+	g, groupCtx := errgroup.WithContext(ctx)
 	resultChan := make(chan struct {
 		html string
 		url  string
+		err  error
 	}, 1)
 
 	for _, altURL := range alternates {
 		altURL := altURL // capture loop variable
 		g.Go(func() error {
-			html, err := h.FetchHTML(ctx, altURL, 0)
-			if err == nil && !h.LooksLikeCFBlock(html) {
+			// Check parent context before starting
+			if ctx.Err() != nil {
+				return nil // Parent expired
+			}
+			
+			// Use parent context (not group context) for the actual fetch
+			// This way parent expiration is independent of errgroup cancellation
+			html, fetchErr := h.FetchHTML(ctx, altURL, 0)
+			
+			// Check parent context after fetch
+			if ctx.Err() != nil {
+				return nil // Parent expired during fetch
+			}
+
+			if fetchErr == nil && !h.LooksLikeCFBlock(html) && len(html) > 0 {
+				// Validate HTML has minimum content before treating as success
+				if len(strings.TrimSpace(html)) > 100 {
+					// Send successful result (non-blocking)
 				select {
 				case resultChan <- struct {
 					html string
 					url  string
-				}{html, altURL}:
+					err  error
+				}{html, altURL, nil}:
 				case <-ctx.Done():
+					// Parent expired while sending
+				case <-groupCtx.Done():
+						// Group context expired (another routine might have succeeded or failed)
+					}
 				}
-				return nil
 			}
-			return err
+			return nil
 		})
 	}
 
@@ -293,8 +336,17 @@ func (h *HTTPClient) FetchWithAlternatesGroup(ctx context.Context, targetURL str
 
 	select {
 	case result := <-resultChan:
-		return result.html, result.url, nil
+		if result.err == nil && result.html != "" {
+			return result.html, result.url, nil
+		}
 	case <-ctx.Done():
-		return "", "", ctx.Err()
+		// Parent context expired while waiting
+		return "", "", fmt.Errorf("HTTP fetch failed: parent context expired during alternate URL attempts: %w", ctx.Err())
 	}
+
+	// All alternates failed
+	if ctx.Err() != nil {
+		return "", "", fmt.Errorf("HTTP fetch failed: parent context expired, all alternate URLs failed: %w", ctx.Err())
+	}
+	return "", "", fmt.Errorf("HTTP fetch failed: all alternate URLs failed or were blocked")
 }

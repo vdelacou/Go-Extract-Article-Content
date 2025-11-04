@@ -1,11 +1,12 @@
 // Package main provides the Google Cloud Run HTTP handler for the web scraper service.
 // It handles incoming requests, performs web scraping operations,
 // and returns structured JSON responses with extracted article content.
-// Authentication is handled by API Gateway before requests reach this service.
+// API key authentication is handled in this service.
 package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"extract-html-scraper/internal/models"
@@ -21,13 +23,87 @@ import (
 
 // CloudRunHandler handles Google Cloud Run requests
 type CloudRunHandler struct {
-	scraper *scraper.Scraper
+	scraper  *scraper.Scraper
+	apiKeys  []string
+	keysLock sync.RWMutex
 }
 
 func NewCloudRunHandler() *CloudRunHandler {
-	return &CloudRunHandler{
+	handler := &CloudRunHandler{
 		scraper: scraper.NewScraper(),
 	}
+
+	// Load API keys on initialization
+	handler.loadAPIKeys()
+
+	return handler
+}
+
+// loadAPIKeys loads API keys from environment variable or Secret Manager
+func (h *CloudRunHandler) loadAPIKeys() {
+	h.keysLock.Lock()
+	defer h.keysLock.Unlock()
+
+	// Try Secret Manager first if configured
+	secretName := os.Getenv("SCRAPER_API_KEY_SECRET")
+	if secretName != "" {
+		if keys, err := loadKeysFromSecretManager(secretName); err == nil && len(keys) > 0 {
+			h.apiKeys = keys
+			fmt.Printf("Loaded %d API key(s) from Secret Manager (secret: %s)\n", len(keys), secretName)
+			return
+		}
+		fmt.Printf("Warning: Failed to load from Secret Manager, falling back to environment variable\n")
+	}
+
+	// Fall back to environment variable
+	keysStr := os.Getenv("SCRAPER_API_KEYS")
+	if keysStr == "" {
+		fmt.Printf("Warning: No API keys configured (SCRAPER_API_KEYS not set)\n")
+		h.apiKeys = []string{}
+		return
+	}
+
+	// Parse comma-separated keys
+	keys := strings.Split(keysStr, ",")
+	h.apiKeys = make([]string, 0, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			h.apiKeys = append(h.apiKeys, key)
+		}
+	}
+
+	fmt.Printf("Loaded %d API key(s) from environment variable\n", len(h.apiKeys))
+}
+
+// loadKeysFromSecretManager loads API keys from Google Secret Manager
+// Returns error if Secret Manager is not available or secret doesn't exist
+func loadKeysFromSecretManager(secretName string) ([]string, error) {
+	// For now, return error to indicate Secret Manager is not implemented
+	// This can be enhanced later with the secretmanager client library
+	// The structure is here to support future enhancement
+	return nil, fmt.Errorf("Secret Manager integration not implemented - use SCRAPER_API_KEYS environment variable")
+}
+
+// validateAPIKey validates the API key from the request against configured keys
+// Uses constant-time comparison to prevent timing attacks
+func (h *CloudRunHandler) validateAPIKey(requestKey string) bool {
+	h.keysLock.RLock()
+	defer h.keysLock.RUnlock()
+
+	// If no keys configured, allow all requests (development mode)
+	if len(h.apiKeys) == 0 {
+		return true
+	}
+
+	// Constant-time comparison against all valid keys
+	for _, validKey := range h.apiKeys {
+		if subtle.ConstantTimeCompare([]byte(requestKey), []byte(validKey)) == 1 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Handler is the main Cloud Run handler function
@@ -53,7 +129,12 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 	// Log the request
 	fmt.Printf("Request received: %s %s\n", r.Method, r.URL.String())
 
-	// API key validation is now handled by API Gateway
+	// Validate API key
+	requestKey := r.URL.Query().Get("key")
+	if !h.validateAPIKey(requestKey) {
+		h.errorResponse(w, http.StatusUnauthorized, "Invalid or missing API key")
+		return
+	}
 
 	// Validate URL parameter
 	targetURL := r.URL.Query().Get("url")
@@ -70,12 +151,6 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Starting scrape for: %s\n", targetURL)
 
-	// Detect if request is coming through API Gateway
-	// API Gateway sets X-Google-Backend header, or we check environment variable
-	// For maximum reliability, set GATEWAY_MODE=true environment variable in Cloud Run
-	isGatewayRequest := os.Getenv("GATEWAY_MODE") == "true" ||
-		r.Header.Get("X-Google-Backend") != ""
-
 	// Calculate timeout (Cloud Run has 5 minute max)
 	timeoutStr := r.URL.Query().Get("timeout")
 	timeoutMs := 300000 // Default 5 minutes
@@ -85,14 +160,8 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If behind API Gateway, cap at 25s (API Gateway max deadline is 30s)
-	if isGatewayRequest && timeoutMs > 25000 {
-		timeoutMs = 25000
-		fmt.Printf("Request via API Gateway - timeout capped at 25000ms\n")
-	}
-
-	// Cap at 4 minutes to be safe for direct Cloud Run requests
-	if !isGatewayRequest && timeoutMs > 240000 {
+	// Cap at 4 minutes (240 seconds) to be safe
+	if timeoutMs > 240000 {
 		timeoutMs = 240000
 	}
 	if timeoutMs < 1000 {
@@ -103,12 +172,7 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	// Log time budget information for debugging
-	if isGatewayRequest {
-		fmt.Printf("API Gateway request: timeout=%dms, remaining budget=%dms\n", timeoutMs, timeoutMs)
-	} else {
-		fmt.Printf("Direct request: timeout=%dms\n", timeoutMs)
-	}
+	fmt.Printf("Request timeout: %dms\n", timeoutMs)
 
 	start := time.Now()
 
@@ -138,14 +202,24 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 
 	// Handle timeout
 	if err != nil && strings.Contains(err.Error(), "context deadline exceeded") {
+		fmt.Printf("Error: Scraping timeout after %dms for URL: %s\n", duration.Milliseconds(), targetURL)
 		h.errorResponse(w, http.StatusGatewayTimeout, "Scrape took too long")
 		return
 	}
 
 	// Handle other errors
 	if err != nil {
-		fmt.Printf("Error processing request: %v\n", err)
-		h.errorResponse(w, http.StatusInternalServerError, "Failed to scrape")
+		// Log full error details for debugging
+		fmt.Printf("Error processing request for URL: %s\n", targetURL)
+		fmt.Printf("Error type: %T\n", err)
+		fmt.Printf("Error message: %v\n", err)
+		fmt.Printf("Request timeout was: %dms, actual duration: %dms\n", timeoutMs, duration.Milliseconds())
+
+		// Create sanitized error message for response
+		errorMsg := sanitizeErrorMessage(err)
+		finalMsg := fmt.Sprintf("Failed to scrape: %s", errorMsg)
+
+		h.errorResponse(w, http.StatusInternalServerError, finalMsg)
 		return
 	}
 
@@ -157,6 +231,56 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 	// Return successful response
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(result)
+}
+
+// sanitizeErrorMessage sanitizes error messages for public responses
+// Truncates long messages, removes sensitive info, but keeps enough detail for debugging
+func sanitizeErrorMessage(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+
+	errorMsg := err.Error()
+
+	// Check if verbose errors are enabled
+	verboseErrors := os.Getenv("VERBOSE_ERRORS") == "true" || os.Getenv("DEBUG") == "true"
+
+	// If verbose errors are enabled, return full message (up to limit)
+	if verboseErrors {
+		if len(errorMsg) > 500 {
+			return errorMsg[:500] + "..."
+		}
+		return errorMsg
+	}
+
+	// Otherwise, sanitize and truncate
+	// Remove potential sensitive paths
+	errorMsg = strings.ReplaceAll(errorMsg, "/app/", "")
+	errorMsg = strings.ReplaceAll(errorMsg, "/tmp/", "")
+
+	// Extract key error types
+	if strings.Contains(errorMsg, "context deadline exceeded") || strings.Contains(errorMsg, "timeout") {
+		return "timeout: request took too long"
+	}
+	if strings.Contains(errorMsg, "HTTP 403") || strings.Contains(errorMsg, "403") {
+		return "access denied: site blocked the request"
+	}
+	if strings.Contains(errorMsg, "HTTP 404") || strings.Contains(errorMsg, "404") {
+		return "not found: URL does not exist"
+	}
+	if strings.Contains(errorMsg, "network") || strings.Contains(errorMsg, "connection") {
+		return "network error: could not connect to target site"
+	}
+	if strings.Contains(errorMsg, "all URLs failed") || strings.Contains(errorMsg, "all alternate URLs") {
+		return "all scraping attempts failed"
+	}
+
+	// Truncate to 200 chars for generic errors
+	if len(errorMsg) > 200 {
+		return errorMsg[:200] + "..."
+	}
+
+	return errorMsg
 }
 
 // errorResponse creates an error response

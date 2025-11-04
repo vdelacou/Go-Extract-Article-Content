@@ -5,16 +5,16 @@ import "time"
 
 // Timeout constants
 const (
-	HTTPTimeout    = 18 * time.Second
-	BrowserTimeout = 40 * time.Second
+	HTTPTimeout    = 12 * time.Second  // Reduced from 18s - SCMP blocks HTTP anyway
+	BrowserTimeout = 60 * time.Second  // Increased from 40s - SCMP needs more time
 	DefaultTimeout = 15 * time.Second
 )
 
 // Content extraction selectors
 const (
-	ContentSelectors = "article, main, [role='main'], .content, .post-content, .entry-content, .article-content, .story-content"
+	ContentSelectors = "[data-module='ArticleBody'], [data-qa='article-body'], .article__body, .story__content-body, article, main, [role='main'], .content, .post-content, .entry-content, .article-content, .story-content"
 	TextElements     = "p, h1, h2, h3, h4, h5, h6, li, blockquote"
-	NonContentTags   = "script, style, nav, header, footer"
+	NonContentTags   = "script, style, nav, header, footer, aside"
 )
 
 // Meta tag properties

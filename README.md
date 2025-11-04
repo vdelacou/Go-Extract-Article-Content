@@ -7,7 +7,7 @@ A high-performance web scraper for article content extraction, built with Go and
 - 🚀 **Go Performance**: 2-10x faster execution than Node.js
 - ⚡ **Ultra-fast Cold Starts**: 1-2s startup time
 - 🐳 **Cloud Run Optimized**: Built for Google Cloud Run with optimal resource usage
-- 🔒 **API Key Authentication**: Secure endpoint access via API Gateway
+- 🔒 **API Key Authentication**: Built-in API key validation
 - 📄 **Smart Article Extraction**: Title, description, content with goquery
 - 🖼️ **Optimized Image Extraction**: Concurrent processing, intelligent scoring
 - 🧹 **Sanitized Output**: Clean HTML-free content with bluemonday
@@ -36,22 +36,24 @@ export GOOGLE_CLOUD_PROJECT="your-project-id"
 # 2. Deploy to Cloud Run
 ./deploy.sh
 
-# 3. Test
-./test.sh "YOUR_GATEWAY_URL" "your-api-key" "https://example.com"
+# 3. Set API keys (see API Key Management section below)
+# 4. Test
+./test.sh "YOUR_SERVICE_URL" "your-api-key" "https://example.com"
 ```
 
 ## 📚 API Documentation
 
 ### Architecture Overview
 
-This service uses a **two-tier architecture** for secure web scraping:
+This service uses a **simplified single-tier architecture**:
 
-1. **API Gateway** - Handles authentication via API key validation
-2. **Cloud Run Service** - Performs the actual web scraping (no auth logic)
+- **Cloud Run Service** - Handles API key validation and performs web scraping
+- Direct HTTPS access via Cloud Run URL
+- Built-in API key authentication
 
 ### Authentication
 
-API Gateway validates requests using the `key` query parameter before forwarding them to the Cloud Run service.
+The service validates API keys directly in the application code. Requests must include a valid `key` query parameter.
 
 ### Endpoint
 
@@ -64,35 +66,39 @@ GET /?url=TARGET_URL&key=YOUR_API_KEY
 - `url` (required): The URL to scrape
 - `key` (required): Your API key for authentication
 - `timeout` (optional): Request timeout in milliseconds. **Important timeout limits:**
-  - **API Gateway requests**: Maximum 25000ms (25 seconds). Requests via API Gateway are automatically capped at 25s.
-  - **Direct Cloud Run requests**: Maximum 240000ms (4 minutes)
-  - Default: 300000ms (5 minutes) for direct requests, 25000ms for gateway requests
+  - **Maximum**: 240000ms (4 minutes)
+  - Default: 300000ms (5 minutes), automatically capped at 240000ms
 
 ### Example Request
 
 ```bash
-curl "https://your-gateway-url/?url=https://example.com&key=your-api-key"
+curl "https://your-service-url/?url=https://example.com&key=your-api-key"
 ```
 
 ### API Key Management
 
-**Important:** API keys are managed by Google Cloud API Gateway, not through environment variables.
+**API keys are configured via environment variables or Google Secret Manager.**
 
-Create and manage API keys using the provided script:
+Manage API keys using the provided script:
 
 ```bash
-# Create a new API key
-./manage-api-keys.sh create
+# Set API keys via environment variable (simple, for dev/test)
+./manage-api-keys.sh set-env "key1,key2,key3"
 
-# List existing API keys
+# Set API keys via Secret Manager (recommended for production)
+./manage-api-keys.sh set-secret "key1,key2,key3"
+
+# List current API key configuration
 ./manage-api-keys.sh list
 ```
 
 **How it works:**
-- API Gateway validates requests using the `key` query parameter
-- API keys are created and managed through Google Cloud API Gateway service
-- No environment variables are needed for API key configuration
-- The Cloud Run service receives pre-authenticated requests from API Gateway
+- API keys are validated in the Go application code
+- Supports multiple keys (comma-separated)
+- Keys can be stored in:
+  1. Environment variable `SCRAPER_API_KEYS` (simple)
+  2. Google Secret Manager (recommended for production)
+- Uses constant-time comparison to prevent timing attacks
 
 ### Response Format
 
@@ -116,12 +122,12 @@ Create and manage API keys using the provided script:
 ### Error Responses
 
 - `400` - Missing URL or invalid URL format (returned by Cloud Run service)
-- `401` - Invalid or missing API key (returned by API Gateway)
+- `401` - Invalid or missing API key (returned by Cloud Run handler)
 - `451` - Blocked by Cloudflare/site protection (returned by Cloud Run service)
 - `500` - Scraping failed (returned by Cloud Run service)
-- `504` - Upstream request timeout (returned by API Gateway) or scrape timeout (returned by Cloud Run service)
+- `504` - Scrape timeout (returned by Cloud Run service)
 
-**Note about 504 errors:** If you're using API Gateway and see 504 errors, ensure your `timeout` parameter is ≤ 25000ms. For longer scraping operations (up to 4 minutes), use the direct Cloud Run service URL instead of the API Gateway URL.
+**Note about 504 errors:** Cloud Run supports up to 300 seconds (5 minutes). If you see timeout errors, ensure your scraping completes within 240 seconds (4 minutes) to account for processing overhead.
 
 ## 🏆 Performance Comparison
 
@@ -151,11 +157,13 @@ Create and manage API keys using the provided script:
 - `SCRAPE_USER_AGENT` - Custom user agent (optional)
 - `CHROME_BIN` - Chrome binary path (auto-configured)
 - `PORT` - Server port (default: 8080)
+- `SCRAPER_API_KEYS` - Comma-separated list of valid API keys (optional, if not using Secret Manager)
+- `SCRAPER_API_KEY_SECRET` - Google Secret Manager secret name containing API keys (optional, preferred for production)
 
 **For Deployment Script:**
 - `GOOGLE_CLOUD_PROJECT` - Your GCP project ID (required)
 
-**Note:** API keys are managed through the API Gateway console or `manage-api-keys.sh` script, not environment variables.
+**Note:** API keys should be configured after deployment using `manage-api-keys.sh` script or manually via Cloud Run environment variables or Secret Manager.
 
 ### Cloud Run Settings
 
@@ -191,7 +199,6 @@ Default configuration in `deploy.sh`:
 ├── cloudbuild.yaml              # GCP build configuration
 ├── deploy.sh                    # Deployment script
 ├── test.sh                      # Testing script
-├── api-gateway-config.yaml      # API Gateway configuration
 ├── manage-api-keys.sh           # API key management
 ├── go.mod                       # Go dependencies
 ├── go.sum
@@ -280,24 +287,37 @@ docker run --rm your-image:latest /usr/bin/chromium-browser --version
 --memory 4Gi
 ```
 
-**3. Timeout errors (504 upstream request timeout)**
+**3. Timeout errors (504)**
 ```bash
-# For API Gateway requests:
-# - Maximum timeout is 25000ms (25 seconds)
-# - Use timeout parameter: ?timeout=25000
-# Example: curl "https://gateway-url/?url=https://example.com&key=KEY&timeout=25000"
-
-# For direct Cloud Run requests (longer scrapes):
-# - Maximum timeout is 240000ms (4 minutes)
-# - Use the Cloud Run service URL directly instead of API Gateway
-# - Increase timeout in deploy.sh: --timeout 600
+# Cloud Run supports up to 300 seconds (5 minutes)
+# Maximum timeout is 240000ms (4 minutes) to account for processing overhead
+# Use timeout parameter: ?timeout=240000
+# Example: curl "https://your-service-url/?url=https://example.com&key=KEY&timeout=240000"
 ```
 
-**4. Authentication errors**
+**4. Authentication errors (401)**
 ```bash
-# Re-authenticate
-gcloud auth login
-gcloud auth application-default login
+# Verify API keys are configured
+./manage-api-keys.sh list
+
+# Set API keys if not configured
+./manage-api-keys.sh set-env "your-api-key"
+
+# Or via Secret Manager
+./manage-api-keys.sh set-secret "your-api-key"
+```
+
+**5. 403 Forbidden errors**
+```bash
+# Ensure public access is enabled (if organization policy allows)
+gcloud run services add-iam-policy-binding extract-html-scraper \
+  --region=us-central1 \
+  --member="allUsers" \
+  --role="roles/run.invoker"
+
+# If organization policy blocks public access, you may need to:
+# 1. Request an exception from your organization admin, or
+# 2. Use authenticated requests with gcloud auth
 ```
 
 ### Debug Mode
@@ -312,15 +332,15 @@ gcloud run services update extract-html-scraper \
 
 ## 🔐 Security Best Practices
 
-1. **Use Google Secret Manager** for API keys:
+1. **Use Google Secret Manager for API keys** (recommended for production):
    ```bash
-   gcloud secrets create scraper-api-key --data-file=- <<< "your-key"
+   ./manage-api-keys.sh set-secret "key1,key2,key3"
    ```
 
-2. **Enable API Gateway authorization**:
-   - API key authentication
-   - Usage plans and quotas
-   - Rate limiting
+2. **Set API keys via environment variable** (for dev/test):
+   ```bash
+   ./manage-api-keys.sh set-env "key1,key2,key3"
+   ```
 
 3. **Set up Cloud Monitoring alerts**:
    - Error rate monitoring
@@ -329,7 +349,7 @@ gcloud run services update extract-html-scraper \
 
 4. **Use IAM roles** for service accounts
 
-5. **Implement rate limiting** via API Gateway
+5. **Rotate API keys regularly** for security
 
 ## 🚀 Advanced Usage
 
@@ -344,13 +364,7 @@ RUN wget -q https://dl.google.com/linux/chrome/rpm/stable/x86_64/google-chrome-s
 
 ### Custom Domain
 
-Use API Gateway custom domain:
-
-```bash
-gcloud api-gateway domains create scraper-api \
-  --domain=api.yourdomain.com \
-  --certificate=your-cert
-```
+Cloud Run supports custom domains. Refer to the [Cloud Run custom domains documentation](https://cloud.google.com/run/docs/mapping-custom-domains) for details.
 
 ### VPC Access
 
@@ -395,8 +409,8 @@ Delete everything:
 # Delete Cloud Run service
 gcloud run services delete extract-html-scraper --region=us-central1
 
-# Delete API Gateway
-gcloud api-gateway gateways delete extract-html-scraper-gateway --location=us-central1
+# Delete Secret Manager secret (if used)
+gcloud secrets delete scraper-api-keys --project=YOUR_PROJECT
 
 # Delete container images
 gcloud container images delete gcr.io/YOUR_PROJECT/extract-html-scraper

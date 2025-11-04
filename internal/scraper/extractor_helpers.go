@@ -2,6 +2,7 @@
 package scraper
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -106,4 +107,94 @@ func ExtractDescriptionFromParagraph(doc *goquery.Document) string {
 	})
 
 	return description
+}
+
+// JSONLDArticle represents schema.org Article or NewsArticle JSON-LD data
+type JSONLDArticle struct {
+	Type            interface{} `json:"@type"`
+	Headline        string      `json:"headline"`
+	ArticleBody     string      `json:"articleBody"`
+	Description     string      `json:"description"`
+	Author          interface{} `json:"author"`
+	DatePublished   string      `json:"datePublished"`
+	DateModified    string      `json:"dateModified"`
+	Image           interface{} `json:"image"`
+	Publisher       interface{} `json:"publisher"`
+	ArticleSection  string      `json:"articleSection"`
+	Keywords        interface{} `json:"keywords"`
+	WordCount       int         `json:"wordCount"`
+	InLanguage      string      `json:"inLanguage"`
+	IsAccessibleFor interface{} `json:"isAccessibleForFree"`
+}
+
+// ExtractJSONLD attempts to extract article content from schema.org JSON-LD structured data
+// Returns headline, body content, and description if found
+func ExtractJSONLD(doc *goquery.Document) (headline, body, description string, found bool) {
+	doc.Find("script[type='application/ld+json']").Each(func(i int, s *goquery.Selection) {
+		if found {
+			return // Already found valid data
+		}
+
+		jsonText := s.Text()
+		if jsonText == "" {
+			return
+		}
+
+		// Try parsing as single object first
+		var article JSONLDArticle
+		if err := json.Unmarshal([]byte(jsonText), &article); err == nil {
+			if isArticleType(article.Type) && article.Headline != "" {
+				headline = article.Headline
+				body = article.ArticleBody
+				description = article.Description
+				found = true
+				return
+			}
+		}
+
+		// Try parsing as array of objects
+		var articles []JSONLDArticle
+		if err := json.Unmarshal([]byte(jsonText), &articles); err == nil {
+			for _, article := range articles {
+				if isArticleType(article.Type) && article.Headline != "" {
+					headline = article.Headline
+					body = article.ArticleBody
+					description = article.Description
+					found = true
+					return
+				}
+			}
+		}
+	})
+
+	return
+}
+
+// isArticleType checks if the @type field indicates an article
+func isArticleType(typeField interface{}) bool {
+	if typeField == nil {
+		return false
+	}
+
+	// Handle string type
+	if typeStr, ok := typeField.(string); ok {
+		return strings.Contains(strings.ToLower(typeStr), "article") ||
+			strings.Contains(strings.ToLower(typeStr), "newsarticle") ||
+			strings.Contains(strings.ToLower(typeStr), "blogposting")
+	}
+
+	// Handle array of types
+	if typeArr, ok := typeField.([]interface{}); ok {
+		for _, t := range typeArr {
+			if typeStr, ok := t.(string); ok {
+				if strings.Contains(strings.ToLower(typeStr), "article") ||
+					strings.Contains(strings.ToLower(typeStr), "newsarticle") ||
+					strings.Contains(strings.ToLower(typeStr), "blogposting") {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }

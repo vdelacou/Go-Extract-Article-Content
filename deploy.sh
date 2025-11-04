@@ -61,83 +61,36 @@ gcloud run deploy $SERVICE_NAME \
     --cpu 2 \
     --timeout 300 \
     --concurrency 10 \
-    --max-instances 100 \
+    --max-instances 100
 
 # Get service URL
 SERVICE_URL=$(gcloud run services describe $SERVICE_NAME --region=$REGION --format="value(status.url)")
 
-# Create service account for API Gateway
-echo -e "${BLUE}Creating service account for API Gateway...${NC}"
-gcloud iam service-accounts create cr-gw-invoker \
-    --display-name="Cloud Run Gateway Invoker" \
-    --project=$PROJECT_ID || echo "Service account already exists"
-
-# Grant service account permission to invoke Cloud Run
-echo -e "${BLUE}Granting Cloud Run invoker role to service account...${NC}"
+# Ensure public access (in case --allow-unauthenticated didn't set IAM correctly)
+echo -e "${BLUE}Ensuring public access...${NC}"
 gcloud run services add-iam-policy-binding $SERVICE_NAME \
     --region=$REGION \
-    --member="serviceAccount:cr-gw-invoker@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role="roles/run.invoker"
+    --member="allUsers" \
+    --role="roles/run.invoker" \
+    --project=$PROJECT_ID 2>/dev/null || echo "Note: Public access may be restricted by organization policy. Service may require authenticated access."
 
-# Enable API Gateway API
-echo -e "${BLUE}Enabling API Gateway API...${NC}"
-gcloud services enable apigateway.googleapis.com
-gcloud services enable servicemanagement.googleapis.com
-gcloud services enable servicecontrol.googleapis.com
-
-# Create API Gateway config
-echo -e "${BLUE}Creating API Gateway configuration...${NC}"
-# Substitute the Cloud Run service URL in the API Gateway config
-# Use | as delimiter to avoid issues with URL slashes
-sed "s|\${CLOUD_RUN_SERVICE_URL}|$SERVICE_URL|g" api-gateway-config.yaml > api-gateway-config-temp.yaml
-
-# Generate unique config version name with timestamp
-CONFIG_VERSION="scraper-config-$(date +%Y%m%d-%H%M%S)"
-echo -e "${BLUE}Creating API config version: $CONFIG_VERSION${NC}"
-
-# Create new API config version
-gcloud api-gateway api-configs create $CONFIG_VERSION \
-    --api=extract-html-scraper-api \
-    --openapi-spec=api-gateway-config-temp.yaml \
-    --backend-auth-service-account=cr-gw-invoker@$PROJECT_ID.iam.gserviceaccount.com \
-    --project=$PROJECT_ID
-
-rm -f api-gateway-config-temp.yaml
-
-# Create or update API
-echo -e "${BLUE}Creating API...${NC}"
-gcloud api-gateway apis create extract-html-scraper-api \
-    --project=$PROJECT_ID || echo "API already exists"
-
-# Deploy gateway (update to use new config version)
-echo -e "${BLUE}Deploying API Gateway...${NC}"
-if gcloud api-gateway gateways describe extract-html-scraper-gateway \
-    --location=$REGION \
-    --project=$PROJECT_ID &>/dev/null; then
-    # Gateway exists - update it with new config
-    echo -e "${BLUE}Updating existing gateway with new config version...${NC}"
-    gcloud api-gateway gateways update extract-html-scraper-gateway \
-        --api=extract-html-scraper-api \
-        --api-config=$CONFIG_VERSION \
-        --location=$REGION \
-        --project=$PROJECT_ID
-else
-    # Gateway doesn't exist - create it
-    echo -e "${BLUE}Creating new gateway...${NC}"
-    gcloud api-gateway gateways create extract-html-scraper-gateway \
-        --api=extract-html-scraper-api \
-        --api-config=$CONFIG_VERSION \
-        --location=$REGION \
-        --project=$PROJECT_ID
-fi
-
-# Get gateway URL
-GATEWAY_URL=$(gcloud api-gateway gateways describe extract-html-scraper-gateway \
-    --location=$REGION \
-    --project=$PROJECT_ID \
-    --format="value(defaultHostname)")
-
-echo -e "${GREEN}✅ API Gateway deployed!${NC}"
-echo -e "${GREEN}Gateway URL: https://$GATEWAY_URL${NC}"
-echo -e "${BLUE}Test the service:${NC}"
-echo "curl \"https://$GATEWAY_URL?url=https://example.com&key=YOUR_API_KEY\""
+echo -e "${GREEN}✅ Cloud Run service deployed!${NC}"
+echo -e "${GREEN}Service URL: $SERVICE_URL${NC}"
+echo ""
+echo -e "${BLUE}📝 Next steps:${NC}"
+echo -e "${BLUE}1. Set API keys via environment variable:${NC}"
+echo "   gcloud run services update $SERVICE_NAME \\"
+echo "     --set-env-vars=\"SCRAPER_API_KEYS=your-key-1,your-key-2\" \\"
+echo "     --region=$REGION"
+echo ""
+echo -e "${BLUE}   Or via Secret Manager (recommended for production):${NC}"
+echo "   # Create secret:"
+echo "   echo -n 'your-key-1,your-key-2' | gcloud secrets create scraper-api-keys --data-file=-"
+echo ""
+echo "   # Grant access and set environment variable:"
+echo "   gcloud run services update $SERVICE_NAME \\"
+echo "     --set-secrets=\"SCRAPER_API_KEY_SECRET=scraper-api-keys:latest\" \\"
+echo "     --region=$REGION"
+echo ""
+echo -e "${BLUE}2. Test the service:${NC}"
+echo "curl \"$SERVICE_URL?url=https://example.com&key=YOUR_API_KEY\""

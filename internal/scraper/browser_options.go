@@ -27,6 +27,7 @@ func DefaultBrowserOptions() BrowserOptions {
 		BlockCSS:     false,
 		WindowWidth:  DefaultWindowWidth,
 		WindowHeight: DefaultWindowHeight,
+		UserAgent:    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	}
 }
 
@@ -46,7 +47,7 @@ func OptimizedBrowserOptions() BrowserOptions {
 // BuildChromeOptions creates Chrome options based on BrowserOptions
 func BuildChromeOptions(opts BrowserOptions) []chromedp.ExecAllocatorOption {
 	chromeOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
+		chromedp.Flag("headless", "new"),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-gpu", true),
@@ -134,15 +135,19 @@ func GetRequestBlockingScript(opts BrowserOptions) string {
 			return originalOpen.apply(this, [method, url, ...args]);
 		};
 		
-		// Anti-detection: Hide webdriver property (ALWAYS, not just in optimized mode)
+		// Enhanced anti-detection: Hide webdriver property completely
 		Object.defineProperty(navigator, 'webdriver', {
-			get: () => false,
+			get: () => undefined,
 			configurable: true
 		});
 		
-		// Additional stealth measures
+		// Remove webdriver property if it exists
+		delete navigator.webdriver;
+		
+		// Spoof plugins
 		Object.defineProperty(navigator, 'plugins', {
-			get: () => [1, 2, 3, 4, 5]
+			get: () => [1, 2, 3, 4, 5],
+			configurable: true
 		});
 		
 		// Override permissions
@@ -160,7 +165,45 @@ func GetRequestBlockingScript(opts BrowserOptions) string {
 		
 		// Override languages
 		Object.defineProperty(navigator, 'languages', {
-			get: () => ['en-US', 'en']
+			get: () => ['en-US', 'en'],
+			configurable: true
+		});
+		
+		// Canvas fingerprint randomization to prevent detection
+		const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+		HTMLCanvasElement.prototype.toDataURL = function(type) {
+			if (type === 'image/png' || type === undefined) {
+				const context = this.getContext('2d');
+				if (context) {
+					const imageData = context.getImageData(0, 0, Math.min(this.width, 100), Math.min(this.height, 100));
+					for (let i = 0; i < imageData.data.length; i += 4) {
+						if (Math.random() < 0.01) {
+							imageData.data[i] = Math.min(255, imageData.data[i] + Math.floor(Math.random() * 3) - 1);
+						}
+					}
+					context.putImageData(imageData, 0, 0);
+				}
+			}
+			return originalToDataURL.apply(this, arguments);
+		};
+		
+		// WebGL vendor spoofing
+		const getParameter = WebGLRenderingContext.prototype.getParameter;
+		WebGLRenderingContext.prototype.getParameter = function(parameter) {
+			if (parameter === 37445) return 'Intel Inc.';
+			if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+			return getParameter.apply(this, arguments);
+		};
+		
+		// Additional fingerprinting protection
+		Object.defineProperty(navigator, 'hardwareConcurrency', {
+			get: () => 8,
+			configurable: true
+		});
+		
+		Object.defineProperty(navigator, 'deviceMemory', {
+			get: () => 8,
+			configurable: true
 		});
 	`
 
