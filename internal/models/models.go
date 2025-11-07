@@ -20,12 +20,18 @@ type Quality struct {
 	WordCount          int     `json:"wordCount"`          // Estimated word count
 }
 
+// Image represents an image with its URL and alt text
+type Image struct {
+	URL string `json:"url"`
+	Alt string `json:"alt,omitempty"`
+}
+
 // ScrapeResponse represents the successful scraping result
 type ScrapeResponse struct {
 	Title       string   `json:"title,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Content     string   `json:"content,omitempty"`
-	Images      []string `json:"images"`
+	Images      []Image  `json:"images"`
 	Metadata    Metadata `json:"metadata"`
 	Author      string   `json:"author,omitempty"`
 	PublishDate string   `json:"publishDate,omitempty"`
@@ -60,6 +66,7 @@ type Metadata struct {
 // ImageCandidate represents a potential image with scoring data
 type ImageCandidate struct {
 	URL       string
+	Alt       string
 	Width     int
 	Height    int
 	InArticle bool

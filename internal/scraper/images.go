@@ -30,15 +30,19 @@ func NewImageExtractor() *ImageExtractor {
 }
 
 // ExtractImagesFromHTML extracts and scores images from HTML content
-func (ie *ImageExtractor) ExtractImagesFromHTML(html, baseURL string) []string {
+// Only returns: 1) OG tag image, 2) JSON-LD image, 3) Images within article/main content
+func (ie *ImageExtractor) ExtractImagesFromHTML(html, baseURL string) []models.Image {
 	// Parse HTML once with goquery
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
-		return []string{}
+		return []models.Image{}
 	}
 
+	// Pre-process HTML to remove unwanted sections
+	ie.preprocessHTML(doc)
+
 	// Extract candidates concurrently
-	candidatesChan := make(chan []models.ImageCandidate, 2)
+	candidatesChan := make(chan []models.ImageCandidate, 3)
 	var wg sync.WaitGroup
 
 	// Extract og:image concurrently
@@ -53,15 +57,27 @@ func (ie *ImageExtractor) ExtractImagesFromHTML(html, baseURL string) []string {
 		}
 	}()
 
-	// Extract img tags concurrently
+	// Extract JSON-LD image concurrently
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		imgCandidates := ie.extractImgTags(doc, baseURL)
+		jsonldImage := ie.extractJSONLDImage(doc, baseURL)
+		if jsonldImage != nil {
+			candidatesChan <- []models.ImageCandidate{*jsonldImage}
+		} else {
+			candidatesChan <- []models.ImageCandidate{}
+		}
+	}()
+
+	// Extract img tags from article content with strict filtering
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		imgCandidates := ie.extractArticleImgTags(doc, baseURL)
 		candidatesChan <- imgCandidates
 	}()
 
-	// Wait for both extractions to complete
+	// Wait for all extractions to complete
 	go func() {
 		wg.Wait()
 		close(candidatesChan)
@@ -74,18 +90,86 @@ func (ie *ImageExtractor) ExtractImagesFromHTML(html, baseURL string) []string {
 	}
 
 	// Filter and score candidates
-	filtered := ie.filterAndScoreCandidates(allCandidates)
+	// STRICT: Only keep OG images or images that are in article scope
+	filtered := ie.filterArticleImages(allCandidates)
 
 	// Sort by score and area
 	ie.sortCandidates(filtered)
 
-	// Return top images
-	return ie.getTopImages(filtered, DefaultImageLimit)
+	// Return top images (OG + JSON-LD + article body images)
+	return ie.getTopImages(filtered, 10) // Allow article images but filter strictly
+}
+
+// preprocessHTML removes unwanted sections from the document before processing
+func (ie *ImageExtractor) preprocessHTML(doc *goquery.Document) {
+	// More aggressive selectors for common non-content areas
+	selectors := []string{
+		"aside",
+		".sidebar",
+		".right-rail",
+		".side-bar",
+		".related-posts",
+		".related-articles",
+		".recommended-posts",
+		".popular-posts",
+		"[class*='sidebar']",
+		"[id*='sidebar']",
+		"[class*='related']",
+		"[id*='related']",
+		"[class*='popular']",
+		"[id*='popular']",
+		"[class*='widget']",
+		"[id*='widget']",
+		"nav",
+		"footer",
+		"header",
+		".lg\\:col-span-1",
+	}
+
+	for _, selector := range selectors {
+		doc.Find(selector).Remove()
+	}
+}
+
+// extractJSONLDImage extracts featured image from JSON-LD structured data
+func (ie *ImageExtractor) extractJSONLDImage(doc *goquery.Document, baseURL string) *models.ImageCandidate {
+	imageURL := ExtractJSONLDImage(doc)
+	if imageURL == "" {
+		return nil
+	}
+
+	// Convert to absolute URL
+	absURL, err := ie.toAbsoluteURL(imageURL, baseURL)
+	if err != nil {
+		return nil
+	}
+
+	// Check if it's an image file
+	if !ie.regexes["imageExt"].MatchString(absURL) {
+		return nil
+	}
+
+	// Try to get article title as alt text (better than nothing)
+	alt := ""
+	if headline, _, _, found := ExtractJSONLD(doc); found && headline != "" {
+		alt = headline
+	}
+
+	return &models.ImageCandidate{
+		URL:       absURL,
+		Alt:       alt,
+		Width:     0, // Dimensions usually not in JSON-LD
+		Height:    0,
+		InArticle: true, // JSON-LD image is the featured article image
+		BadHint:   false,
+		Source:    "jsonld",
+	}
 }
 
 // extractOgImage extracts Open Graph image metadata
 func (ie *ImageExtractor) extractOgImage(doc *goquery.Document, baseURL string) *models.ImageCandidate {
 	var ogImageURL string
+	var ogImageAlt string
 	var width, height int
 
 	// Find og:image meta tag
@@ -99,6 +183,10 @@ func (ie *ImageExtractor) extractOgImage(doc *goquery.Document, baseURL string) 
 		case "og:image", "og:image:secure_url":
 			if content, exists := s.Attr("content"); exists {
 				ogImageURL = content
+			}
+		case "og:image:alt":
+			if content, exists := s.Attr("content"); exists {
+				ogImageAlt = content
 			}
 		case "og:image:width":
 			if content, exists := s.Attr("content"); exists {
@@ -143,6 +231,7 @@ func (ie *ImageExtractor) extractOgImage(doc *goquery.Document, baseURL string) 
 
 	return &models.ImageCandidate{
 		URL:       absURL,
+		Alt:       strings.TrimSpace(ogImageAlt),
 		Width:     width,
 		Height:    height,
 		InArticle: true, // og:image is considered in-article
@@ -151,7 +240,42 @@ func (ie *ImageExtractor) extractOgImage(doc *goquery.Document, baseURL string) 
 	}
 }
 
-// extractImgTags extracts all img tags from the document
+// extractArticleImgTags extracts img tags ONLY from article/main content areas
+func (ie *ImageExtractor) extractArticleImgTags(doc *goquery.Document, baseURL string) []models.ImageCandidate {
+	var candidates []models.ImageCandidate
+
+	// Find article content containers using our enhanced selectors
+	selectors := strings.Split(ContentSelectors, ", ")
+
+	for _, selector := range selectors {
+		selector = strings.TrimSpace(selector)
+		doc.Find(selector).Each(func(i int, container *goquery.Selection) {
+			// EXCLUDE related/featured posts, sidebars, and other non-article sections
+			// Check if this container or its parents have exclusion markers
+			if ie.isExcludedSection(container) {
+				return // Skip this container
+			}
+
+			container.Find("img").Each(func(j int, s *goquery.Selection) {
+				// Double-check: Skip if image is in an excluded subsection
+				if ie.isInExcludedSection(s) {
+					return
+				}
+
+				candidate := ie.extractImgTag(s, baseURL)
+				if candidate != nil {
+					// Mark as definitely in article since we're searching within article containers
+					candidate.InArticle = true
+					candidates = append(candidates, *candidate)
+				}
+			})
+		})
+	}
+
+	return candidates
+}
+
+// extractImgTags extracts all img tags from the document (legacy, not used in strict mode)
 func (ie *ImageExtractor) extractImgTags(doc *goquery.Document, baseURL string) []models.ImageCandidate {
 	var candidates []models.ImageCandidate
 
@@ -201,6 +325,10 @@ func (ie *ImageExtractor) extractImgTag(s *goquery.Selection, baseURL string) *m
 		return nil
 	}
 
+	// Extract alt text
+	alt, _ := s.Attr("alt")
+	alt = strings.TrimSpace(alt)
+
 	// Extract dimensions
 	width, height := ie.extractDimensions(s)
 
@@ -223,6 +351,7 @@ func (ie *ImageExtractor) extractImgTag(s *goquery.Selection, baseURL string) *m
 
 	return &models.ImageCandidate{
 		URL:       absURL,
+		Alt:       alt,
 		Width:     width,
 		Height:    height,
 		InArticle: inArticle,
@@ -361,7 +490,176 @@ func (ie *ImageExtractor) hasBadHint(s *goquery.Selection, url string) bool {
 	return ie.regexes["badHint"].MatchString(html)
 }
 
-// filterAndScoreCandidates filters and scores image candidates
+// isExcludedSection checks if a container should be excluded from image extraction
+func (ie *ImageExtractor) isExcludedSection(s *goquery.Selection) bool {
+	// Get all class names and IDs
+	classes, _ := s.Attr("class")
+	id, _ := s.Attr("id")
+	dataAttrs := ""
+
+	// Collect all data-* attributes
+	for _, attr := range []string{"data-widget", "data-component", "data-type", "data-section"} {
+		if val, exists := s.Attr(attr); exists {
+			dataAttrs += val + " "
+		}
+	}
+
+	combined := strings.ToLower(classes + " " + id + " " + dataAttrs)
+
+	// Patterns that indicate non-article sections
+	exclusionPatterns := []string{
+		"sidebar",
+		"side-bar",
+		"side_bar",
+		"related", "related-posts", "related-articles", "related-content", "related-stories",
+		"featured", "featured-posts", "featured-articles", "featured-content", "featured-stories",
+		"popular", "trending", "most-read", "most-popular",
+		"recommended", "recommendation", "you-may-like",
+		"widget",
+		"banner",
+		"advertisement", "ad-", "advert",
+		"navigation", "nav-", "navbar",
+		"menu",
+		"footer",
+		"header",
+		"carousel",
+		"slider",
+		"gallery", // Unless it's the article gallery
+		"aside",
+		"promo", "promotion",
+		"sponsored",
+		"more-stories", "more-articles", "more-news",
+		"latest-posts", "latest-articles", "latest-news", "latest-stories",
+		"recent-posts", "recent-articles", "recent-news",
+		"top-stories", "top-posts",
+		"highlights",
+		"must-read",
+		"dont-miss",
+		"editor-pick", "editor-choice",
+		"read-more", "read-next",
+		"story-list", "article-list", "post-list",
+		"grid-items", "list-items",
+	}
+
+	for _, pattern := range exclusionPatterns {
+		if strings.Contains(combined, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isInExcludedSection checks if an element is within an excluded section
+func (ie *ImageExtractor) isInExcludedSection(s *goquery.Selection) bool {
+	// Check if any parent matches exclusion criteria
+	parents := s.Parents()
+	for i := 0; i < parents.Length(); i++ {
+		parent := parents.Eq(i)
+		if ie.isExcludedSection(parent) {
+			return true
+		}
+	}
+
+	// Additional check: Exclude images that are inside link-heavy containers
+	// This catches "related posts" sections that are lists of linked thumbnails
+	if ie.isInLinkList(s) {
+		return true
+	}
+
+	return false
+}
+
+// isInLinkList checks if an image is in a list of links (common for related posts)
+func (ie *ImageExtractor) isInLinkList(s *goquery.Selection) bool {
+	// Look up the tree for a container with multiple links (thumbnail grid pattern)
+	parents := s.Parents()
+	for i := 0; i < parents.Length() && i < 5; i++ { // Check up to 5 levels up
+		parent := parents.Eq(i)
+
+		// Count links in this container
+		linkCount := parent.Find("a").Length()
+
+		// Count images in this container
+		imgCount := parent.Find("img").Length()
+
+		// If there are multiple links and multiple images, it's likely a thumbnail grid
+		// Skip if this looks like a "related posts" grid (3+ links, 2+ images)
+		if linkCount >= 3 && imgCount >= 2 {
+			// Extra check: if the container has list-like structure
+			tagName := goquery.NodeName(parent)
+			if tagName == "ul" || tagName == "ol" || tagName == "nav" {
+				return true // Definitely a navigation/list
+			}
+
+			// Check if images are small (thumbnails vs article images)
+			// This prevents false positives on article galleries
+			hasLargeImage := false
+			smallImageCount := 0
+
+			parent.Find("img").Each(func(j int, img *goquery.Selection) {
+				// Check width attribute
+				if width, exists := img.Attr("width"); exists {
+					if w, err := strconv.Atoi(width); err == nil {
+						if w > 400 {
+							hasLargeImage = true
+						} else if w > 0 {
+							smallImageCount++
+						}
+					}
+				}
+				// Also check style attribute for width
+				if !hasLargeImage {
+					if style, exists := img.Attr("style"); exists {
+						widthMatch := ie.regexes["widthStyle"].FindStringSubmatch(style)
+						if len(widthMatch) > 1 {
+							if w, err := strconv.ParseFloat(widthMatch[1], 64); err == nil && w > 400 {
+								hasLargeImage = true
+							}
+						}
+					}
+				}
+			})
+
+			// Only exclude if:
+			// 1. Container has list-like structure (already checked above), OR
+			// 2. All images are explicitly small (width <= 400) AND high link density
+			// If ANY image is large, or no width info, assume it's article content
+			if !hasLargeImage && smallImageCount >= 2 && linkCount >= 6 {
+				// High threshold: 6+ links and 2+ small images = related posts
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// filterArticleImages strictly filters to only OG/JSON-LD images or images within article content
+func (ie *ImageExtractor) filterArticleImages(candidates []models.ImageCandidate) []models.ImageCandidate {
+	var filtered []models.ImageCandidate
+
+	for _, c := range candidates {
+		// STRICT FILTER: Only keep structured data images (OG, JSON-LD) or images marked as InArticle
+		if c.Source != "og" && c.Source != "jsonld" && !c.InArticle {
+			continue
+		}
+
+		// Apply basic quality filters
+		if !ie.passesBasicFilters(c) {
+			continue
+		}
+
+		// Calculate score
+		c.Score = ie.calculateScore(c)
+		c.Area = c.Width * c.Height
+		filtered = append(filtered, c)
+	}
+
+	return filtered
+}
+
+// filterAndScoreCandidates filters and scores image candidates (legacy)
 func (ie *ImageExtractor) filterAndScoreCandidates(candidates []models.ImageCandidate) []models.ImageCandidate {
 	var filtered []models.ImageCandidate
 
@@ -379,7 +677,42 @@ func (ie *ImageExtractor) filterAndScoreCandidates(candidates []models.ImageCand
 	return filtered
 }
 
-// passesFilters checks if a candidate passes all filters
+// passesBasicFilters checks if a candidate passes basic quality filters
+// More lenient than passesFilters - used for article images
+func (ie *ImageExtractor) passesBasicFilters(c models.ImageCandidate) bool {
+	// Structured data images always pass (they're curated by the publisher)
+	if c.Source == "og" || c.Source == "jsonld" {
+		return true
+	}
+
+	// For article images, apply minimal filtering
+	if c.Width > 0 && c.Height > 0 {
+		// Only filter out very small images (likely icons)
+		shortSide := min(c.Width, c.Height)
+		if shortSide < 100 {
+			return false
+		}
+
+		// Filter out obvious ad sizes
+		if ie.isAdSize(c.Width, c.Height) {
+			return false
+		}
+
+		// Filter bad hints only for very small images
+		if c.BadHint && shortSide < 200 {
+			return false
+		}
+	} else {
+		// Unknown dimensions - only filter if has bad hints
+		if c.BadHint {
+			return false
+		}
+	}
+
+	return true
+}
+
+// passesFilters checks if a candidate passes all filters (legacy, stricter)
 func (ie *ImageExtractor) passesFilters(c models.ImageCandidate) bool {
 	if c.Width > 0 && c.Height > 0 {
 		shortSide := min(c.Width, c.Height)
@@ -457,9 +790,9 @@ func (ie *ImageExtractor) calculateScore(c models.ImageCandidate) float64 {
 		score += 2.0
 	}
 
-	// OG image boost
-	if c.Source == "og" {
-		score += 1.0
+	// Structured data boost (OG or JSON-LD)
+	if c.Source == "og" || c.Source == "jsonld" {
+		score += 1.5 // Higher priority for publisher-curated images
 	}
 
 	// Aspect ratio bonus
@@ -495,15 +828,18 @@ func (ie *ImageExtractor) sortCandidates(candidates []models.ImageCandidate) {
 	}
 }
 
-// getTopImages returns the top N unique image URLs
-func (ie *ImageExtractor) getTopImages(candidates []models.ImageCandidate, limit int) []string {
+// getTopImages returns the top N unique images with URL and alt text
+func (ie *ImageExtractor) getTopImages(candidates []models.ImageCandidate, limit int) []models.Image {
 	seen := make(map[string]bool)
-	var result []string
+	var result []models.Image
 
 	for _, c := range candidates {
 		if !seen[c.URL] {
 			seen[c.URL] = true
-			result = append(result, c.URL)
+			result = append(result, models.Image{
+				URL: c.URL,
+				Alt: c.Alt,
+			})
 			if len(result) >= limit {
 				break
 			}

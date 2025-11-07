@@ -198,3 +198,78 @@ func isArticleType(typeField interface{}) bool {
 
 	return false
 }
+
+// ExtractJSONLDImage extracts the featured image URL from JSON-LD data
+// Returns the image URL if found
+func ExtractJSONLDImage(doc *goquery.Document) string {
+	var imageURL string
+
+	doc.Find("script[type='application/ld+json']").Each(func(i int, s *goquery.Selection) {
+		if imageURL != "" {
+			return // Already found
+		}
+
+		jsonText := s.Text()
+		if jsonText == "" {
+			return
+		}
+
+		// Try parsing as single object
+		var article JSONLDArticle
+		if err := json.Unmarshal([]byte(jsonText), &article); err == nil {
+			if isArticleType(article.Type) && article.Image != nil {
+				imageURL = extractImageURLFromField(article.Image)
+				if imageURL != "" {
+					return
+				}
+			}
+		}
+
+		// Try parsing as array
+		var articles []JSONLDArticle
+		if err := json.Unmarshal([]byte(jsonText), &articles); err == nil {
+			for _, article := range articles {
+				if isArticleType(article.Type) && article.Image != nil {
+					imageURL = extractImageURLFromField(article.Image)
+					if imageURL != "" {
+						return
+					}
+				}
+			}
+		}
+	})
+
+	return imageURL
+}
+
+// extractImageURLFromField extracts URL from various image field formats
+func extractImageURLFromField(imageField interface{}) string {
+	if imageField == nil {
+		return ""
+	}
+
+	// Handle string (direct URL)
+	if urlStr, ok := imageField.(string); ok {
+		return urlStr
+	}
+
+	// Handle object with url field
+	if imageObj, ok := imageField.(map[string]interface{}); ok {
+		if url, ok := imageObj["url"].(string); ok {
+			return url
+		}
+		// Some sites use @id instead
+		if url, ok := imageObj["@id"].(string); ok {
+			return url
+		}
+	}
+
+	// Handle array (take first image)
+	if imageArr, ok := imageField.([]interface{}); ok {
+		if len(imageArr) > 0 {
+			return extractImageURLFromField(imageArr[0])
+		}
+	}
+
+	return ""
+}

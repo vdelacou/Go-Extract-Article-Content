@@ -166,7 +166,7 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 		domain, _ := url.Parse(targetURL)
 		fmt.Printf("Detected Cloudflare block for domain: %s\n", domain.Hostname())
 		return models.ScrapeResponse{
-				Images: []string{},
+				Images: []models.Image{},
 			}, &models.CloudflareBlockError{
 				Domain: domain.Hostname(),
 				Err:    err,

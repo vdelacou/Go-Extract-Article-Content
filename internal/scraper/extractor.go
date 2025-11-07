@@ -35,7 +35,7 @@ func (ae *ArticleExtractor) ExtractArticleWithOptions(html, baseURL string, opti
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return models.ScrapeResponse{
-			Images: []string{},
+			Images: []models.Image{},
 		}
 	}
 
@@ -287,7 +287,7 @@ func (ae *ArticleExtractor) ExtractArticleSimple(html, baseURL string) models.Sc
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return models.ScrapeResponse{
-			Images: []string{},
+			Images: []models.Image{},
 		}
 	}
 
@@ -340,7 +340,7 @@ func (ae *ArticleExtractor) ExtractArticleWithMultipleStrategies(html, baseURL s
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		fmt.Printf("Failed to parse HTML: %v\n", err)
-		return models.ScrapeResponse{Images: []string{}}
+		return models.ScrapeResponse{Images: []models.Image{}}
 	}
 
 	// Strategy 0: Try JSON-LD structured data first (best for news sites like SCMP)
@@ -435,7 +435,7 @@ type extractionResultWithStrategy struct {
 func (ae *ArticleExtractor) selectBestResult(results []models.ScrapeResponse, strategies []string) extractionResultWithStrategy {
 	if len(results) == 0 {
 		return extractionResultWithStrategy{
-			Result:   models.ScrapeResponse{Images: []string{}},
+			Result:   models.ScrapeResponse{Images: []models.Image{}},
 			Strategy: "none",
 		}
 	}
@@ -486,7 +486,7 @@ func (ae *ArticleExtractor) selectBestResult(results []models.ScrapeResponse, st
 func (ae *ArticleExtractor) ExtractMetadataOnly(html, baseURL string) models.ScrapeResponse {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
-		return models.ScrapeResponse{Images: []string{}}
+		return models.ScrapeResponse{Images: []models.Image{}}
 	}
 
 	// Extract title
