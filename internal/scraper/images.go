@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"extract-html-scraper/internal/config"
 	"extract-html-scraper/internal/models"
@@ -118,17 +119,32 @@ func (ie *ImageExtractor) preprocessHTML(doc *goquery.Document) {
 		"[id*='related']",
 		"[class*='popular']",
 		"[id*='popular']",
-		"[class*='widget']",
-		"[id*='widget']",
 		"nav",
 		"footer",
-		"header",
 		".lg\\:col-span-1",
 	}
 
 	for _, selector := range selectors {
 		doc.Find(selector).Remove()
 	}
+
+	// Preserve headers that are part of article/main content while removing site-level chrome
+	doc.Find("header").Each(func(i int, s *goquery.Selection) {
+		if s.ParentsFiltered("article, main").Length() == 0 {
+			s.Remove()
+		}
+	})
+
+	// Remove widget-marked elements only when they are outside article/main content
+	doc.Find("[class*='widget'], [id*='widget']").Each(func(i int, s *goquery.Selection) {
+		if s.Is("article, main") {
+			return
+		}
+		if ie.isInArticleScope(s) {
+			return
+		}
+		s.Remove()
+	})
 }
 
 // extractJSONLDImage extracts featured image from JSON-LD structured data
@@ -143,11 +159,13 @@ func (ie *ImageExtractor) extractJSONLDImage(doc *goquery.Document, baseURL stri
 	if err != nil {
 		return nil
 	}
+	absURL = ie.cleanImageURL(absURL)
 
 	// Check if it's an image file
 	if !ie.regexes["imageExt"].MatchString(absURL) {
 		return nil
 	}
+	absURL = ie.cleanImageURL(absURL)
 
 	// Try to get article title as alt text (better than nothing)
 	alt := ""
@@ -212,6 +230,7 @@ func (ie *ImageExtractor) extractOgImage(doc *goquery.Document, baseURL string) 
 	if err != nil {
 		return nil
 	}
+	absURL = ie.cleanImageURL(absURL)
 
 	// Check if it's an image file
 	if !ie.regexes["imageExt"].MatchString(absURL) {
@@ -244,33 +263,27 @@ func (ie *ImageExtractor) extractOgImage(doc *goquery.Document, baseURL string) 
 func (ie *ImageExtractor) extractArticleImgTags(doc *goquery.Document, baseURL string) []models.ImageCandidate {
 	var candidates []models.ImageCandidate
 
-	// Find article content containers using our enhanced selectors
-	selectors := strings.Split(ContentSelectors, ", ")
-
-	for _, selector := range selectors {
-		selector = strings.TrimSpace(selector)
-		doc.Find(selector).Each(func(i int, container *goquery.Selection) {
-			// EXCLUDE related/featured posts, sidebars, and other non-article sections
-			// Check if this container or its parents have exclusion markers
-			if ie.isExcludedSection(container) {
-				return // Skip this container
-			}
-
-			container.Find("img").Each(func(j int, s *goquery.Selection) {
-				// Double-check: Skip if image is in an excluded subsection
-				if ie.isInExcludedSection(s) {
-					return
-				}
-
-				candidate := ie.extractImgTag(s, baseURL)
-				if candidate != nil {
-					// Mark as definitely in article since we're searching within article containers
-					candidate.InArticle = true
-					candidates = append(candidates, *candidate)
-				}
-			})
-		})
+	articleSelectors := []string{
+		"main article",
+		"article .article-body",
+		"article #article-body",
+		"section[itemprop='articleBody']",
+		"[itemprop='articleBody']",
 	}
+
+	selector := strings.Join(articleSelectors, ",")
+	doc.Find(selector).Each(func(i int, container *goquery.Selection) {
+		if ie.isInExcludedSection(container) {
+			return
+		}
+		container.Find("img").Each(func(j int, s *goquery.Selection) {
+			candidate := ie.extractImgTag(s, baseURL)
+			if candidate != nil {
+				candidate.InArticle = true
+				candidates = append(candidates, *candidate)
+			}
+		})
+	})
 
 	return candidates
 }
@@ -293,7 +306,9 @@ func (ie *ImageExtractor) extractImgTags(doc *goquery.Document, baseURL string) 
 func (ie *ImageExtractor) extractImgTag(s *goquery.Selection, baseURL string) *models.ImageCandidate {
 	// Get src attribute or data-src variants
 	src := ""
-	if srcAttr, exists := s.Attr("src"); exists {
+	if dataSrc, exists := s.Attr("data-srcset"); exists {
+		src = ie.pickFromSrcset(dataSrc)
+	} else if srcAttr, exists := s.Attr("src"); exists {
 		src = srcAttr
 	} else if dataSrc, exists := s.Attr("data-src"); exists {
 		src = dataSrc
@@ -325,6 +340,11 @@ func (ie *ImageExtractor) extractImgTag(s *goquery.Selection, baseURL string) *m
 		return nil
 	}
 
+	originalURL := absURL
+	absURL = ie.cleanImageURL(absURL)
+
+	absURL = ie.cleanImageURL(absURL)
+
 	// Extract alt text
 	alt, _ := s.Attr("alt")
 	alt = strings.TrimSpace(alt)
@@ -334,7 +354,7 @@ func (ie *ImageExtractor) extractImgTag(s *goquery.Selection, baseURL string) *m
 
 	// If dimensions not found in attributes, try URL
 	if width == 0 || height == 0 {
-		urlWidth, urlHeight := ie.parseDimensionsFromURL(absURL)
+		urlWidth, urlHeight := ie.parseDimensionsFromURL(originalURL)
 		if width == 0 {
 			width = urlWidth
 		}
@@ -474,8 +494,29 @@ func (ie *ImageExtractor) pickFromSrcset(srcset string) string {
 
 // isInArticleScope checks if the img tag is within article or main tags
 func (ie *ImageExtractor) isInArticleScope(s *goquery.Selection) bool {
-	// Check if any parent is article or main
-	return s.ParentsFiltered("article, main").Length() > 0
+	// Check if any parent is within recognized article containers
+	articleSelectors := []string{
+		"article",
+		"main",
+		"section[itemprop='articleBody']",
+		"[itemprop='articleBody']",
+		"section.article-body",
+		"#article-body",
+	}
+
+	selector := strings.Join(articleSelectors, ",")
+	parents := s.Parents()
+	for i := 0; i < parents.Length(); i++ {
+		parent := parents.Eq(i)
+		if ie.isInExcludedSection(parent) {
+			return false
+		}
+		if parent.Is(selector) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // hasBadHint checks if the image has bad hints (ads, icons, etc.)
@@ -537,7 +578,7 @@ func (ie *ImageExtractor) isExcludedSection(s *goquery.Selection) bool {
 		"dont-miss",
 		"editor-pick", "editor-choice",
 		"read-more", "read-next",
-		"story-list", "article-list", "post-list",
+		"story-list", "post-list",
 		"grid-items", "list-items",
 	}
 
@@ -640,8 +681,7 @@ func (ie *ImageExtractor) filterArticleImages(candidates []models.ImageCandidate
 	var filtered []models.ImageCandidate
 
 	for _, c := range candidates {
-		// STRICT FILTER: Only keep structured data images (OG, JSON-LD) or images marked as InArticle
-		if c.Source != "og" && c.Source != "jsonld" && !c.InArticle {
+		if !c.InArticle {
 			continue
 		}
 
@@ -677,16 +717,15 @@ func (ie *ImageExtractor) filterAndScoreCandidates(candidates []models.ImageCand
 	return filtered
 }
 
-// passesBasicFilters checks if a candidate passes basic quality filters
-// More lenient than passesFilters - used for article images
 func (ie *ImageExtractor) passesBasicFilters(c models.ImageCandidate) bool {
-	// Structured data images always pass (they're curated by the publisher)
-	if c.Source == "og" || c.Source == "jsonld" {
-		return true
-	}
-
 	// For article images, apply minimal filtering
 	if c.Width > 0 && c.Height > 0 {
+		if c.Width <= c.Height {
+			return false
+		}
+		if c.Width < 600 {
+			return false
+		}
 		// Only filter out very small images (likely icons)
 		shortSide := min(c.Width, c.Height)
 		if shortSide < 100 {
@@ -830,20 +869,30 @@ func (ie *ImageExtractor) sortCandidates(candidates []models.ImageCandidate) {
 
 // getTopImages returns the top N unique images with URL and alt text
 func (ie *ImageExtractor) getTopImages(candidates []models.ImageCandidate, limit int) []models.Image {
-	seen := make(map[string]bool)
-	var result []models.Image
+	urlToImage := make(map[string]models.Image)
+	var orderedURLs []string
 
 	for _, c := range candidates {
-		if !seen[c.URL] {
-			seen[c.URL] = true
-			result = append(result, models.Image{
+		if _, exists := urlToImage[c.URL]; !exists {
+			urlToImage[c.URL] = models.Image{
 				URL: c.URL,
 				Alt: c.Alt,
-			})
-			if len(result) >= limit {
-				break
 			}
+			orderedURLs = append(orderedURLs, c.URL)
+		} else if urlToImage[c.URL].Alt == "" && c.Alt != "" {
+			// If the existing image has no alt text, but this one does, update it.
+			img := urlToImage[c.URL]
+			img.Alt = c.Alt
+			urlToImage[c.URL] = img
 		}
+	}
+
+	var result []models.Image
+	for i, url := range orderedURLs {
+		if i >= limit {
+			break
+		}
+		result = append(result, urlToImage[url])
 	}
 
 	return result
@@ -863,6 +912,27 @@ func (ie *ImageExtractor) toAbsoluteURL(relativeURL, baseURL string) (string, er
 
 	abs := base.ResolveReference(rel)
 	return abs.String(), nil
+}
+
+// cleanImageURL removes common resizing/cropping parameters from the query string to keep canonical image URLs.
+func (ie *ImageExtractor) cleanImageURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	parsed.RawQuery = ""
+	return parsed.String()
+}
+
+func normalizeParamKey(key string) string {
+	var b strings.Builder
+	for _, r := range key {
+		if unicode.IsLetter(r) {
+			b.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return b.String()
 }
 
 // Helper functions
