@@ -36,6 +36,7 @@ func (ae *ArticleExtractor) ExtractArticleWithOptions(html, baseURL string, opti
 	if err != nil {
 		return models.ScrapeResponse{
 			Images: []models.Image{},
+			Videos: []models.Video{},
 		}
 	}
 
@@ -53,6 +54,10 @@ func (ae *ArticleExtractor) ExtractArticleWithOptions(html, baseURL string, opti
 	imageExtractor := NewImageExtractor()
 	images := imageExtractor.ExtractImagesFromHTML(html, baseURL)
 
+	// Extract videos using the video extractor
+	videoExtractor := NewVideoExtractor()
+	videos := videoExtractor.ExtractVideosFromHTML(html, baseURL)
+
 	// Extract metadata if requested
 	var metadata models.ScrapeResponse
 	if options.IncludeMetadata {
@@ -67,6 +72,7 @@ func (ae *ArticleExtractor) ExtractArticleWithOptions(html, baseURL string, opti
 		Description: description,
 		Content:     content,
 		Images:      images,
+		Videos:      videos,
 		Quality: models.Quality{
 			Score:              quality.Score,
 			TextToHTMLRatio:    quality.TextToHTMLRatio,
@@ -288,6 +294,7 @@ func (ae *ArticleExtractor) ExtractArticleSimple(html, baseURL string) models.Sc
 	if err != nil {
 		return models.ScrapeResponse{
 			Images: []models.Image{},
+			Videos: []models.Video{},
 		}
 	}
 
@@ -317,11 +324,16 @@ func (ae *ArticleExtractor) ExtractArticleSimple(html, baseURL string) models.Sc
 	imageExtractor := NewImageExtractor()
 	images := imageExtractor.ExtractImagesFromHTML(html, baseURL)
 
+	// Extract videos
+	videoExtractor := NewVideoExtractor()
+	videos := videoExtractor.ExtractVideosFromHTML(html, baseURL)
+
 	return models.ScrapeResponse{
 		Title:       ae.sanitizeText(title),
 		Description: ae.sanitizeText(description),
 		Content:     ae.sanitizeText(content),
 		Images:      images,
+		Videos:      videos,
 	}
 }
 
@@ -340,7 +352,7 @@ func (ae *ArticleExtractor) ExtractArticleWithMultipleStrategies(html, baseURL s
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		fmt.Printf("Failed to parse HTML: %v\n", err)
-		return models.ScrapeResponse{Images: []models.Image{}}
+		return models.ScrapeResponse{Images: []models.Image{}, Videos: []models.Video{}}
 	}
 
 	// Strategy 0: Try JSON-LD structured data first (best for news sites like SCMP)
@@ -349,6 +361,10 @@ func (ae *ArticleExtractor) ExtractArticleWithMultipleStrategies(html, baseURL s
 		// Extract images using the optimized image extractor
 		imageExtractor := NewImageExtractor()
 		images := imageExtractor.ExtractImagesFromHTML(html, baseURL)
+
+		// Extract videos using the video extractor
+		videoExtractor := NewVideoExtractor()
+		videos := videoExtractor.ExtractVideosFromHTML(html, baseURL)
 
 		// If articleBody is available, use it
 		content := body
@@ -365,6 +381,7 @@ func (ae *ArticleExtractor) ExtractArticleWithMultipleStrategies(html, baseURL s
 			Description: ae.sanitizeText(description),
 			Content:     ae.sanitizeText(content),
 			Images:      images,
+			Videos:      videos,
 			Quality: models.Quality{
 				Score:              quality.Score + 10, // Bonus for structured data
 				TextToHTMLRatio:    quality.TextToHTMLRatio,
@@ -435,7 +452,7 @@ type extractionResultWithStrategy struct {
 func (ae *ArticleExtractor) selectBestResult(results []models.ScrapeResponse, strategies []string) extractionResultWithStrategy {
 	if len(results) == 0 {
 		return extractionResultWithStrategy{
-			Result:   models.ScrapeResponse{Images: []models.Image{}},
+			Result:   models.ScrapeResponse{Images: []models.Image{}, Videos: []models.Video{}},
 			Strategy: "none",
 		}
 	}
@@ -486,7 +503,7 @@ func (ae *ArticleExtractor) selectBestResult(results []models.ScrapeResponse, st
 func (ae *ArticleExtractor) ExtractMetadataOnly(html, baseURL string) models.ScrapeResponse {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
-		return models.ScrapeResponse{Images: []models.Image{}}
+		return models.ScrapeResponse{Images: []models.Image{}, Videos: []models.Video{}}
 	}
 
 	// Extract title
@@ -510,11 +527,16 @@ func (ae *ArticleExtractor) ExtractMetadataOnly(html, baseURL string) models.Scr
 	imageExtractor := NewImageExtractor()
 	images := imageExtractor.ExtractImagesFromHTML(html, baseURL)
 
+	// Extract videos
+	videoExtractor := NewVideoExtractor()
+	videos := videoExtractor.ExtractVideosFromHTML(html, baseURL)
+
 	return models.ScrapeResponse{
 		Title:       ae.sanitizeText(title),
 		Description: ae.sanitizeText(description),
 		Content:     "", // No content body in metadata-only mode
 		Images:      images,
+		Videos:      videos,
 		Author:      metadata.Author,
 		PublishDate: metadata.PublishDate,
 		Excerpt:     metadata.Excerpt,

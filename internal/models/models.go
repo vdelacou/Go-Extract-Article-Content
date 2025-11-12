@@ -26,12 +26,21 @@ type Image struct {
 	Alt string `json:"alt,omitempty"`
 }
 
+// Video represents a video with its URL and metadata
+type Video struct {
+	URL      string `json:"url"`
+	Provider string `json:"provider,omitempty"` // youtube, vimeo, html5, etc.
+	Type     string `json:"type,omitempty"`     // embedded, html5, og
+	Title    string `json:"title,omitempty"`
+}
+
 // ScrapeResponse represents the successful scraping result
 type ScrapeResponse struct {
 	Title       string   `json:"title,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Content     string   `json:"content,omitempty"`
 	Images      []Image  `json:"images"`
+	Videos      []Video  `json:"videos,omitempty"`
 	Metadata    Metadata `json:"metadata"`
 	Author      string   `json:"author,omitempty"`
 	PublishDate string   `json:"publishDate,omitempty"`
