@@ -192,7 +192,11 @@ func (ie *ImageExtractor) extractOgImage(doc *goquery.Document, baseURL string) 
 
 	// Find og:image meta tag
 	doc.Find("meta").Each(func(i int, s *goquery.Selection) {
+		// OpenGraph specifies property=, but many pages emit name= instead
 		property, exists := s.Attr("property")
+		if !exists {
+			property, exists = s.Attr("name")
+		}
 		if !exists {
 			return
 		}
@@ -887,7 +891,8 @@ func (ie *ImageExtractor) getTopImages(candidates []models.ImageCandidate, limit
 		}
 	}
 
-	var result []models.Image
+	// Non-nil so a page without images encodes as "images": [] rather than null
+	result := []models.Image{}
 	for i, url := range orderedURLs {
 		if i >= limit {
 			break

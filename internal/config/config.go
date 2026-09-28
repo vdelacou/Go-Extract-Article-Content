@@ -46,7 +46,9 @@ func DefaultImageConfig() ImageConfig {
 			"200x200": true, "180x150": true, "234x60": true, "120x240": true,
 			"88x31": true,
 		},
-		BadHintRegex: `(sprite|icon|favicon|logo|avatar|emoji|placeholder|pixel|tracker|ads?|adserver|promo|beacon)`,
+		// Ad terms must stand alone as tokens: as bare substrings they match
+		// uploads (WordPress's default media path), download, headline and gradient.
+		BadHintRegex: `(sprite|icon|favicon|logo|avatar|emoji|placeholder|pixel|tracker|promo|beacon)|(^|[^a-z0-9])(ads?|adserver)([^a-z0-9]|$)`,
 	}
 }
 
