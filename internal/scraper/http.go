@@ -119,9 +119,11 @@ func (h *HTTPClient) FetchHTML(ctx context.Context, targetURL string, retryCount
 	return string(body), nil
 }
 
-// LooksLikeCFBlock checks if HTML content indicates Cloudflare blocking
+// LooksLikeCFBlock checks if HTML content is a bot-check or block page. It matches the
+// interstitial's wording rather than the word "cloudflare", which ordinary pages served
+// through Cloudflare carry in their script URLs.
 func (h *HTTPClient) LooksLikeCFBlock(html string) bool {
-	return IsCloudflareBlock(fmt.Errorf(html))
+	return h.regexes["cfBlock"].MatchString(strings.ToLower(html))
 }
 
 // GenerateAlternateURLs creates alternative URLs for AMP/mobile fallback

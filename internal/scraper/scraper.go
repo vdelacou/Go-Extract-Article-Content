@@ -66,6 +66,10 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 	remainingTime := calculateRemainingTime(ctx)
 	fmt.Printf("Remaining time budget: %v\n", remainingTime)
 
+	// staticResult keeps a Phase 1 extraction that found the page but no article text,
+	// the mark of a client-rendered page. It is returned if the browser does no better.
+	var staticResult *models.ScrapeResponse
+
 	// Phase 1: Try HTTP fetching with alternate URLs
 	// Adjust HTTP timeout based on remaining budget (allow 80% max for HTTP phase)
 	httpTimeout := adjustTimeoutForBudget(HTTPTimeout, remainingTime, 0.8)
@@ -91,14 +95,22 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 				remainingAfterPhase1 := calculateRemainingTime(ctx)
 				fmt.Printf("Phase 1: HTTP fetch succeeded for %s (HTML size: %d bytes, consumed: %v, remaining: %v)\n", finalURL, len(html), phase1Duration, remainingAfterPhase1)
 				result := s.extractor.ExtractArticleWithMultipleStrategies(html, finalURL)
-				// Verify extraction found at least title or content
-				if len(result.Content) == 0 && len(result.Title) == 0 {
+				switch {
+				case len(result.Content) == 0 && len(result.Title) == 0:
 					fmt.Printf("Phase 1: All extraction strategies returned empty, treating as failure\n")
 					err = fmt.Errorf("content extraction returned empty results")
-				} else {
+				case s.isChallengeResult(result):
+					fmt.Printf("Phase 1: Page is a bot-check interstitial, treating as failure\n")
+					err = fmt.Errorf("HTTP fetch returned a bot-check page")
+				case !hasArticleText(result):
+					fmt.Printf("Phase 1: No article text in static HTML (title=%d, quality=%d), rendering in the browser\n",
+						len(result.Title), result.Quality.Score)
+					staticResult = &result
+					err = fmt.Errorf("static HTML has no article text")
+				default:
 					fmt.Printf("Phase 1: Extraction succeeded (strategy worked, title=%d, content=%d)\n",
 						len(result.Title), len(result.Content))
-					return result, nil
+					return withContentFlag(result), nil
 				}
 			}
 		}
@@ -108,6 +120,9 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 
 		// Check if parent context expired during Phase 1
 		if ctx.Err() != nil {
+			if staticResult != nil {
+				return withContentFlag(*staticResult), nil
+			}
 			return models.ScrapeResponse{}, fmt.Errorf("scraping failed: parent context expired during HTTP phase: %w", ctx.Err())
 		}
 	}
@@ -120,6 +135,9 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 	buffer := 5 * time.Second
 	maxBrowserTime := remainingTime - buffer
 	if maxBrowserTime < 1*time.Second {
+		if staticResult != nil {
+			return withContentFlag(*staticResult), nil
+		}
 		return models.ScrapeResponse{}, fmt.Errorf("scraping failed: insufficient time budget for browser phase (remaining: %v)", remainingTime)
 	}
 
@@ -142,19 +160,31 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 			finalURL, htmlLength, textLength, phase2Duration, remainingAfterPhase2)
 		result := s.extractor.ExtractArticleWithMultipleStrategies(html, finalURL)
 		// Let extraction be the final judge - only reject if both title and content are empty
-		if len(result.Content) == 0 && len(result.Title) == 0 {
+		switch {
+		case len(result.Content) == 0 && len(result.Title) == 0:
 			fmt.Printf("Phase 2: All extraction strategies returned empty (title=%d chars, content=%d chars), treating as failure\n",
 				len(result.Title), len(result.Content))
 			err = fmt.Errorf("content extraction returned empty results")
-		} else {
+		case s.isChallengeResult(result):
+			fmt.Printf("Phase 2: Browser got a bot-check interstitial instead of the article\n")
+			err = errChallengeBlocked
+		case staticResult != nil && !hasArticleText(result):
+			err = fmt.Errorf("browser render has no article text either")
+		default:
 			fmt.Printf("Phase 2: Extraction successful (title=%d chars, content=%d chars, quality score=%d)\n",
 				len(result.Title), len(result.Content), result.Quality.Score)
-			return result, nil
+			return withContentFlag(result), nil
 		}
 	}
 
 	remainingAfterPhase2 := calculateRemainingTime(ctx)
 	fmt.Printf("Phase 2: Browser scraping failed for %s: %v (consumed: %v, remaining: %v)\n", targetURL, err, phase2Duration, remainingAfterPhase2)
+
+	if staticResult != nil {
+		// The page itself loaded: its title and images are worth more to the caller than an error
+		fmt.Printf("Returning the Phase 1 result without article text\n")
+		return withContentFlag(*staticResult), nil
+	}
 
 	// Check if parent context expired during Phase 2
 	if ctx.Err() != nil {
@@ -175,6 +205,25 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 
 	// Combine errors from both phases for better context
 	return models.ScrapeResponse{}, fmt.Errorf("scraping failed - HTTP phase failed, browser phase also failed: %w", err)
+}
+
+// hasArticleText reports whether extraction found body text. A page that yields only a
+// title and images renders its article client-side and needs the browser.
+func hasArticleText(r models.ScrapeResponse) bool {
+	return strings.TrimSpace(r.Content) != "" && r.Quality.Score > 0
+}
+
+// isChallengeResult reports whether extraction returned a bot-check interstitial instead
+// of an article, which would otherwise reach callers as a short article.
+func (s *Scraper) isChallengeResult(r models.ScrapeResponse) bool {
+	return len(r.Content) < MaxChallengeContentLen && s.httpClient.LooksLikeCFBlock(r.Title+"\n"+r.Content)
+}
+
+// withContentFlag marks a result whose article text is missing, so callers need not
+// infer it from an empty content field.
+func withContentFlag(r models.ScrapeResponse) models.ScrapeResponse {
+	r.ContentMissing = strings.TrimSpace(r.Content) == ""
+	return r
 }
 
 // ScrapeSmartWithTimeout runs ScrapeSmart with a timeout
