@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"extract-html-scraper/internal/models"
@@ -12,20 +13,12 @@ import (
 )
 
 type VideoExtractor struct {
-	youtubeRegex     *regexp.Regexp
-	vimeoRegex       *regexp.Regexp
-	dailymotionRegex *regexp.Regexp
-	twitchRegex      *regexp.Regexp
-	videoExtRegex    *regexp.Regexp
+	videoExtRegex *regexp.Regexp
 }
 
 func NewVideoExtractor() *VideoExtractor {
 	return &VideoExtractor{
-		youtubeRegex:     regexp.MustCompile(`(?:youtube\.com/(?:watch\?v=|embed/|v/)|youtu\.be/)([a-zA-Z0-9_-]{11})`),
-		vimeoRegex:       regexp.MustCompile(`vimeo\.com/(?:video/)?(\d+)`),
-		dailymotionRegex: regexp.MustCompile(`dailymotion\.com/(?:video|embed)/([a-zA-Z0-9]+)`),
-		twitchRegex:      regexp.MustCompile(`twitch\.tv/(?:videos/)?(\d+)`),
-		videoExtRegex:    regexp.MustCompile(`\.(mp4|webm|ogg|mov|avi|mkv)(?:\?|$)`),
+		videoExtRegex: regexp.MustCompile(`\.(mp4|webm|ogg|mov|avi|mkv)(?:\?|$)`),
 	}
 }
 
@@ -55,7 +48,11 @@ func (ve *VideoExtractor) extractOGVideos(doc *goquery.Document, baseURL string,
 	var videoURL, videoTitle string
 
 	doc.Find("meta").Each(func(i int, s *goquery.Selection) {
+		// OpenGraph specifies property=, but many pages emit name= instead
 		property, exists := s.Attr("property")
+		if !exists {
+			property, exists = s.Attr("name")
+		}
 		if !exists {
 			return
 		}
@@ -122,7 +119,8 @@ func (ve *VideoExtractor) extractJSONLDVideos(doc *goquery.Document, baseURL str
 
 	doc.Find("script[type='application/ld+json']").Each(func(i int, s *goquery.Selection) {
 		jsonText := s.Text()
-		var data map[string]interface{}
+		// A block holds either one object or an array of them
+		var data interface{}
 		if err := json.Unmarshal([]byte(jsonText), &data); err != nil {
 			return
 		}
@@ -133,42 +131,56 @@ func (ve *VideoExtractor) extractJSONLDVideos(doc *goquery.Document, baseURL str
 	return videos
 }
 
-// extractVideoFromJSONLD recursively extracts video data from JSON-LD
-func (ve *VideoExtractor) extractVideoFromJSONLD(data map[string]interface{}, baseURL string, seen map[string]bool) []models.Video {
+// extractVideoFromJSONLD recursively extracts every VideoObject from JSON-LD:
+// top-level arrays, @graph entries and nested properties such as NewsArticle.video
+func (ve *VideoExtractor) extractVideoFromJSONLD(value interface{}, baseURL string, seen map[string]bool) []models.Video {
 	var videos []models.Video
 
-	// Handle @graph arrays
-	if graph, ok := data["@graph"].([]interface{}); ok {
-		for _, item := range graph {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				videos = append(videos, ve.extractVideoFromJSONLD(itemMap, baseURL, seen)...)
-			}
+	switch node := value.(type) {
+	case []interface{}:
+		for _, item := range node {
+			videos = append(videos, ve.extractVideoFromJSONLD(item, baseURL, seen)...)
+		}
+	case map[string]interface{}:
+		if video, ok := ve.videoFromJSONLDObject(node, baseURL, seen); ok {
+			videos = append(videos, video)
+		}
+
+		// Visit properties in sorted order so nested videos keep a stable order
+		keys := make([]string, 0, len(node))
+		for key := range node {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			videos = append(videos, ve.extractVideoFromJSONLD(node[key], baseURL, seen)...)
 		}
 	}
 
-	// Check if this is a VideoObject
-	typeVal, hasType := data["@type"]
-	if !hasType {
-		return videos
-	}
+	return videos
+}
 
-	typeStr, isString := typeVal.(string)
-	if !isString {
-		// Handle array of types
-		if typeArr, ok := typeVal.([]interface{}); ok {
-			for _, t := range typeArr {
-				if tStr, ok := t.(string); ok {
-					if strings.Contains(tStr, "Video") {
-						typeStr = tStr
-						break
-					}
-				}
+// isVideoObjectType reports whether a JSON-LD @type names a VideoObject,
+// including forms such as schema:VideoObject and MusicVideoObject. Matching
+// on VideoObject rather than Video rejects VideoGame and VideoGallery.
+func isVideoObjectType(typeVal interface{}) bool {
+	switch t := typeVal.(type) {
+	case string:
+		return strings.Contains(t, "VideoObject")
+	case []interface{}:
+		for _, item := range t {
+			if s, ok := item.(string); ok && strings.Contains(s, "VideoObject") {
+				return true
 			}
 		}
 	}
+	return false
+}
 
-	if typeStr == "" || !strings.Contains(typeStr, "Video") {
-		return videos
+// videoFromJSONLDObject converts a single JSON-LD VideoObject into a video
+func (ve *VideoExtractor) videoFromJSONLDObject(data map[string]interface{}, baseURL string, seen map[string]bool) (models.Video, bool) {
+	if !isVideoObjectType(data["@type"]) {
+		return models.Video{}, false
 	}
 
 	// Extract video URL
@@ -190,21 +202,22 @@ func (ve *VideoExtractor) extractVideoFromJSONLD(data map[string]interface{}, ba
 		videoTitle = headline
 	}
 
-	if videoURL != "" {
-		absURL, err := ve.toAbsoluteURL(videoURL, baseURL)
-		if err == nil && !seen[absURL] {
-			seen[absURL] = true
-			provider := ve.detectProvider(absURL)
-			videos = append(videos, models.Video{
-				URL:      absURL,
-				Provider: provider,
-				Type:     "jsonld",
-				Title:    videoTitle,
-			})
-		}
+	if videoURL == "" {
+		return models.Video{}, false
 	}
 
-	return videos
+	absURL, err := ve.toAbsoluteURL(videoURL, baseURL)
+	if err != nil || seen[absURL] {
+		return models.Video{}, false
+	}
+	seen[absURL] = true
+	provider := ve.detectProvider(absURL)
+	return models.Video{
+		URL:      absURL,
+		Provider: provider,
+		Type:     "jsonld",
+		Title:    videoTitle,
+	}, true
 }
 
 // extractEmbeddedVideos extracts videos from iframe embeds
@@ -222,9 +235,18 @@ func (ve *VideoExtractor) extractEmbeddedVideos(doc *goquery.Document, baseURL s
 
 	selector := strings.Join(articleSelectors, ",")
 	doc.Find(selector).Find("iframe").Each(func(i int, s *goquery.Selection) {
-		if src, exists := s.Attr("src"); exists {
+		// Lazy loaders keep the real URL in data-src or data-lazy-src and put
+		// a placeholder such as about:blank in src, so take the first video URL
+		for _, attr := range []string{"src", "data-src", "data-lazy-src"} {
+			src, exists := s.Attr(attr)
+			if !exists {
+				continue
+			}
 			absURL, err := ve.toAbsoluteURL(src, baseURL)
-			if err == nil && ve.isVideoEmbed(absURL) && !seen[absURL] {
+			if err != nil || !ve.isVideoEmbed(absURL) {
+				continue
+			}
+			if !seen[absURL] {
 				seen[absURL] = true
 				provider := ve.detectProvider(absURL)
 				title, _ := s.Attr("title")
@@ -235,6 +257,7 @@ func (ve *VideoExtractor) extractEmbeddedVideos(doc *goquery.Document, baseURL s
 					Title:    title,
 				})
 			}
+			break
 		}
 	})
 
@@ -292,6 +315,7 @@ func (ve *VideoExtractor) extractHTML5Videos(doc *goquery.Document, baseURL stri
 func (ve *VideoExtractor) isVideoEmbed(url string) bool {
 	lowerURL := strings.ToLower(url)
 	return strings.Contains(lowerURL, "youtube.com") ||
+		strings.Contains(lowerURL, "youtube-nocookie.com") ||
 		strings.Contains(lowerURL, "youtu.be") ||
 		strings.Contains(lowerURL, "vimeo.com") ||
 		strings.Contains(lowerURL, "dailymotion.com") ||
@@ -305,7 +329,7 @@ func (ve *VideoExtractor) isVideoEmbed(url string) bool {
 func (ve *VideoExtractor) detectProvider(url string) string {
 	lowerURL := strings.ToLower(url)
 
-	if strings.Contains(lowerURL, "youtube.com") || strings.Contains(lowerURL, "youtu.be") {
+	if strings.Contains(lowerURL, "youtube.com") || strings.Contains(lowerURL, "youtube-nocookie.com") || strings.Contains(lowerURL, "youtu.be") {
 		return "youtube"
 	}
 	if strings.Contains(lowerURL, "vimeo.com") {

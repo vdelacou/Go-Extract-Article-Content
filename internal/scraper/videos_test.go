@@ -23,6 +23,13 @@ func TestExtractVideosFromHTML(t *testing.T) {
 			},
 		},
 		{
+			name: "og:video declared with name=",
+			html: `<head><meta name="og:video" content="https://www.youtube.com/embed/dQw4w9WgXcQ" /></head>`,
+			want: []models.Video{
+				{URL: "https://www.youtube.com/embed/dQw4w9WgXcQ", Provider: "youtube", Type: "og"},
+			},
+		},
+		{
 			name: "twitter:player",
 			html: `<head><meta name="twitter:player" content="https://player.vimeo.com/video/76979871" /></head>`,
 			want: []models.Video{
@@ -47,10 +54,45 @@ func TestExtractVideosFromHTML(t *testing.T) {
 			},
 		},
 		{
+			name: "JSON-LD block holding a top-level array",
+			html: `<script type="application/ld+json">[
+				{"@type": "NewsArticle", "headline": "Story"},
+				{"@type": "VideoObject", "name": "Array clip", "contentUrl": "https://cdn.example.com/media/array.mp4"}
+			]</script>`,
+			want: []models.Video{
+				{URL: "https://cdn.example.com/media/array.mp4", Provider: "html5", Type: "jsonld", Title: "Array clip"},
+			},
+		},
+		{
+			name: "JSON-LD VideoObject nested as NewsArticle.video",
+			html: `<script type="application/ld+json">{"@type": "NewsArticle", "headline": "Story",
+				"video": {"@type": "VideoObject", "name": "Nested clip", "embedUrl": "https://www.youtube.com/embed/abcdefghijk"}}</script>`,
+			want: []models.Video{
+				{URL: "https://www.youtube.com/embed/abcdefghijk", Provider: "youtube", Type: "jsonld", Title: "Nested clip"},
+			},
+		},
+		{
+			name: "JSON-LD VideoGame and VideoGallery are not videos",
+			html: `<script type="application/ld+json">{"@type": "VideoGame", "name": "Game", "url": "https://example.com/game"}</script>
+				<script type="application/ld+json">{"@type": "VideoGallery", "name": "Gallery", "url": "https://example.com/videos"}</script>`,
+			want: nil,
+		},
+		{
 			name: "article iframe resolves protocol-relative src and keeps its title",
 			html: `<body><article><iframe src="//www.youtube.com/embed/dQw4w9WgXcQ" title="Keynote"></iframe></article></body>`,
 			want: []models.Video{
 				{URL: "https://www.youtube.com/embed/dQw4w9WgXcQ", Provider: "youtube", Type: "embedded", Title: "Keynote"},
+			},
+		},
+		{
+			name: "lazy iframes use data-src or data-lazy-src when src is a placeholder",
+			html: `<body><article>
+				<iframe data-src="https://www.youtube.com/embed/dQw4w9WgXcQ"></iframe>
+				<iframe src="about:blank" data-lazy-src="https://player.vimeo.com/video/76979871"></iframe>
+			</article></body>`,
+			want: []models.Video{
+				{URL: "https://www.youtube.com/embed/dQw4w9WgXcQ", Provider: "youtube", Type: "embedded"},
+				{URL: "https://player.vimeo.com/video/76979871", Provider: "vimeo", Type: "embedded"},
 			},
 		},
 		{
@@ -134,6 +176,7 @@ func TestVideoProviderDetection(t *testing.T) {
 	}{
 		{"https://www.youtube.com/embed/dQw4w9WgXcQ", true, "youtube"},
 		{"https://youtu.be/dQw4w9WgXcQ", true, "youtube"},
+		{"https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", true, "youtube"},
 		{"https://player.vimeo.com/video/76979871", true, "vimeo"},
 		{"https://www.dailymotion.com/embed/video/x8abcd1", true, "dailymotion"},
 		{"https://player.twitch.tv/?video=123456", true, "twitch"},
