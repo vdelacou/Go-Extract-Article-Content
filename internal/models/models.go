@@ -38,7 +38,7 @@ type Video struct {
 type ScrapeResponse struct {
 	Title       string   `json:"title,omitempty"`
 	Description string   `json:"description,omitempty"`
-	Content     string   `json:"content,omitempty"`
+	Content     string   `json:"content"`
 	Images      []Image  `json:"images"`
 	Videos      []Video  `json:"videos,omitempty"`
 	Metadata    Metadata `json:"metadata"`
@@ -49,6 +49,9 @@ type ScrapeResponse struct {
 	Language    string   `json:"language,omitempty"`
 	TextLength  int      `json:"textLength,omitempty"`
 	Quality     Quality  `json:"quality,omitempty"`
+	// ContentMissing is set when no article text could be extracted, so callers can
+	// tell an empty page from a short article without guessing from the length.
+	ContentMissing bool `json:"contentMissing,omitempty"`
 }
 
 // BlockedResponse represents when scraping is blocked

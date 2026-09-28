@@ -119,6 +119,31 @@ func TestExtractImagesFromHTMLGeekParkStyle(t *testing.T) {
 	}
 }
 
+// GeekPark 371040: the cover is only in a name= og:image with an upper-case .JPEG
+// extension, and the body images are feishu-image:// links no browser can load.
+func TestExtractImagesFromHTMLAcceptsUpperCaseExtension(t *testing.T) {
+	coverURL := "https://imgslim.geekpark.net/uploads/image/file/b1/29/b1298a4d5ffba57e09b0e7a23bbb4f77.JPEG"
+	html := `
+		<html><head>
+		<meta content="` + coverURL + `" name="og:image" />
+		</head><body>
+		<img id="topic-cover" src="` + coverURL + `" />
+		<article>
+			<div id="article-body">
+				<p>Body text.</p>
+				<img src="feishu-image://abc123" />
+			</div>
+		</article>
+		</body></html>
+	`
+
+	images := NewImageExtractor().ExtractImagesFromHTML(html, "http://www.geekpark.net/news/371040")
+
+	if len(images) != 1 || images[0].URL != coverURL {
+		t.Fatalf("expected only the cover %s, got %v", coverURL, images)
+	}
+}
+
 func TestBadHintMatchesAdTermsOnlyAsTokens(t *testing.T) {
 	cases := []struct {
 		url  string

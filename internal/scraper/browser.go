@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -11,6 +12,10 @@ import (
 
 	"github.com/chromedp/chromedp"
 )
+
+// errChallengeBlocked reports a bot-check page that did not clear on its own. Its
+// CF_BLOCKED marker makes ScrapeSmart answer with a block (HTTP 451), not the page text.
+var errChallengeBlocked = errors.New("CF_BLOCKED: bot challenge did not clear")
 
 type BrowserClient struct {
 	config  config.ScrapeConfig
@@ -78,11 +83,15 @@ func (b *BrowserClient) scrapeWithOptions(ctx context.Context, targetURL string,
 
 	// Try primary URL first with graceful degradation
 	html, finalURL, err := b.navigateAndExtract(ctx, targetURL)
+	if errors.Is(err, errChallengeBlocked) {
+		// Alternates sit behind the same site protection; trying them only burns the budget
+		return "", "", err
+	}
 	if err == nil && len(html) > 0 {
 		// Check for blocking first - this is a hard failure
 		if b.LooksLikeCFBlock(html) {
 			fmt.Printf("Primary URL blocked by site protection\n")
-			// Continue to alternates instead of returning error immediately
+			return "", "", errChallengeBlocked
 		} else {
 			// Got HTML - return it (let extraction determine validity)
 			textLength := len(strings.TrimSpace(html))
@@ -711,6 +720,10 @@ func (b *BrowserClient) retryNavigation(ctx context.Context, targetURL string, m
 		}
 
 		snapshots, url, err := b.captureHTMLSnapshots(ctx, targetURL)
+		if errors.Is(err, errChallengeBlocked) {
+			// A retry reloads the same challenge
+			return nil, url, err
+		}
 
 		// Collect all snapshots
 		allSnapshots = append(allSnapshots, snapshots...)
@@ -847,32 +860,26 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 	// This way if context expires, we already have the initial snapshot
 	err2 := chromedp.Run(ctx, chromedp.Tasks{
 
-		// Check for Cloudflare challenge (with adaptive timeout)
+		// Check for a bot challenge. Poll briefly for it to clear, then give up: the waits
+		// below would otherwise spend most of the budget on a page that never loads.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var bodyHTML string
-			if err := chromedp.OuterHTML("body", &bodyHTML).Do(ctx); err == nil {
-				if b.LooksLikeCFBlock(bodyHTML) {
-					// Adaptive wait based on remaining time
-					remainingTime := calculateRemainingTime(ctx)
-					cfWait := 30 * time.Second
-					if remainingTime < cfWait+5*time.Second {
-						cfWait = remainingTime - 5*time.Second
-						if cfWait < 5*time.Second {
-							cfWait = 5 * time.Second
-						}
-					}
-					fmt.Printf("Cloudflare challenge detected, waiting up to %v for resolution...\n", cfWait)
-					chromedp.Sleep(cfWait).Do(ctx)
-					// Re-check after wait
-					chromedp.OuterHTML("body", &bodyHTML).Do(ctx)
-					if b.LooksLikeCFBlock(bodyHTML) {
-						fmt.Printf("Challenge still present after %v wait\n", cfWait)
-					} else {
-						fmt.Printf("Challenge resolved after wait\n")
-					}
+			if err := chromedp.OuterHTML("body", &bodyHTML).Do(ctx); err != nil || !b.LooksLikeCFBlock(bodyHTML) {
+				return nil
+			}
+			fmt.Printf("Bot challenge detected, waiting up to %v for it to clear...\n", ChallengeWait)
+			deadline := time.Now().Add(ChallengeWait)
+			for time.Now().Before(deadline) {
+				if err := chromedp.Sleep(1 * time.Second).Do(ctx); err != nil {
+					return nil
+				}
+				if err := chromedp.OuterHTML("body", &bodyHTML).Do(ctx); err == nil && !b.LooksLikeCFBlock(bodyHTML) {
+					fmt.Printf("Challenge cleared\n")
+					return nil
 				}
 			}
-			return nil
+			fmt.Printf("Challenge still present after %v, giving up\n", ChallengeWait)
+			return errChallengeBlocked
 		}),
 
 		// Phase 2: Wait for ready state (adaptive timeout based on remaining time)
@@ -1040,6 +1047,11 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 			return nil
 		}),
 	})
+
+	if errors.Is(err2, errChallengeBlocked) {
+		// Every snapshot so far is the interstitial; returning one would pass it off as the article
+		return nil, currentURL, err2
+	}
 
 	// Combine errors from both navigation runs
 	if err != nil {
