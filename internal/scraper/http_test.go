@@ -25,6 +25,20 @@ func TestHTTPLooksLikeCFBlock(t *testing.T) {
 			want: true,
 		},
 		{
+			// tvinsider half a second into the challenge: the script has replaced the
+			// noscript text and has not drawn its own yet
+			name: "challenge page mid-render",
+			html: `<html><head><title>Just a moment...</title></head><body><div class="main-content"></div>
+				<script>(function(){window._cf_chl_opt = {cType: 'managed'};})();</script></body></html>`,
+			want: true,
+		},
+		{
+			name: "article quoting the challenge title",
+			html: `<html><head><title>Paradise season 3 update</title></head>
+				<body><article><p>"Just a moment..." she said, and the scene cut away.</p></article></body></html>`,
+			want: false,
+		},
+		{
 			// tvinsider: what the challenge renders to in a browser
 			name: "challenge page as rendered",
 			html: `<body><h1>www.tvinsider.com</h1><h2>Performing security verification</h2>

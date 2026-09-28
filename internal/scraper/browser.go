@@ -862,9 +862,11 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 
 		// Check for a bot challenge. Poll briefly for it to clear, then give up: the waits
 		// below would otherwise spend most of the budget on a page that never loads.
+		// Read the whole document: early on, the challenge's title and script config are
+		// its only marks, before it draws any text into the body.
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			var bodyHTML string
-			if err := chromedp.OuterHTML("body", &bodyHTML).Do(ctx); err != nil || !b.LooksLikeCFBlock(bodyHTML) {
+			var pageHTML string
+			if err := chromedp.OuterHTML("html", &pageHTML).Do(ctx); err != nil || !b.LooksLikeCFBlock(pageHTML) {
 				return nil
 			}
 			fmt.Printf("Bot challenge detected, waiting up to %v for it to clear...\n", ChallengeWait)
@@ -873,7 +875,7 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 				if err := chromedp.Sleep(1 * time.Second).Do(ctx); err != nil {
 					return nil
 				}
-				if err := chromedp.OuterHTML("body", &bodyHTML).Do(ctx); err == nil && !b.LooksLikeCFBlock(bodyHTML) {
+				if err := chromedp.OuterHTML("html", &pageHTML).Do(ctx); err == nil && !b.LooksLikeCFBlock(pageHTML) {
 					fmt.Printf("Challenge cleared\n")
 					return nil
 				}
