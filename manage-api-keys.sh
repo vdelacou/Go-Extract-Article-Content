@@ -19,9 +19,15 @@ case "$1" in
         echo "Example: $0 set-env 'abc123,def456'"
         exit 1
     fi
+    if [[ "$2" == *@* ]]; then
+        echo "❌ Keys must not contain '@' (used as the gcloud list delimiter)"
+        exit 1
+    fi
     echo "Setting API keys via environment variable..."
+    # gcloud splits --set-env-vars on commas; ^@^ makes @ the pair delimiter
+    # so the comma-separated key list stays in a single value
     gcloud run services update $SERVICE_NAME \
-        --set-env-vars="SCRAPER_API_KEYS=$2" \
+        --set-env-vars="^@^SCRAPER_API_KEYS=$2" \
         --region=$REGION \
         --project=$PROJECT_ID
     echo "✅ API keys updated via environment variable"

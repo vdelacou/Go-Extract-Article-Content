@@ -54,7 +54,7 @@ export GOOGLE_CLOUD_PROJECT="your-project-id"
 ./test.sh "SERVICE_URL" "API_KEY" "https://example.com"
 
 # Test authenticated endpoint
-./test-authenticated.sh
+./test-authenticated.sh "SERVICE_URL" "API_KEY"
 
 # Manual test
 curl "https://your-service-url/?url=https://example.com&key=YOUR_API_KEY"
