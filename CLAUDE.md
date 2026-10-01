@@ -163,6 +163,10 @@ Images are extracted with a scoring algorithm that prioritizes:
   - Environment variable: `SCRAPER_API_KEYS` (comma-separated)
   - Google Secret Manager: `SCRAPER_API_KEY_SECRET` (not yet implemented, returns error)
 
+### Response Text
+
+`title`, `description` and `content` are plain text: markup is stripped and HTML entities are decoded, so a title reads `'Tulsa King'`, not `&#39;Tulsa King&#39;`. Text that appears on the page as `<script>` comes back as those literal characters. Escape these fields before rendering them as HTML.
+
 ### Error Handling
 
 - Error sanitization happens in `main.go:236-284` to prevent leaking sensitive paths
