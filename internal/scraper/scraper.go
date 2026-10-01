@@ -15,10 +15,20 @@ import (
 	"extract-html-scraper/internal/models"
 )
 
+// pageFetcher is the Phase 1 HTTP client
+type pageFetcher interface {
+	FetchWithAlternatesGroup(ctx context.Context, targetURL string) (string, string, error)
+}
+
+// pageRenderer is the Phase 2 browser
+type pageRenderer interface {
+	ScrapeWithBrowserOptimized(ctx context.Context, targetURL string, timeoutMs int) (string, string, error)
+}
+
 // Scraper orchestrates the scraping process with HTTP-first, browser-fallback strategy
 type Scraper struct {
-	httpClient    *HTTPClient
-	browserClient *BrowserClient
+	httpClient    pageFetcher
+	browserClient pageRenderer
 	extractor     *ArticleExtractor
 }
 
@@ -68,7 +78,7 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 	remainingTime := calculateRemainingTime(ctx)
 	fmt.Printf("Remaining time budget: %v\n", remainingTime)
 
-	// Cloudflare verdict from Phase 1, if any (used to report 451 if Phase 2 also fails)
+	// Cloudflare verdict from Phase 1, if any (reported if Phase 2 also fails)
 	var phase1CF *models.CloudflareBlockError
 	// A Phase 1 result with a title but no article body, kept while the browser tries
 	var phase1Result *models.ScrapeResponse
@@ -196,15 +206,16 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 		return models.ScrapeResponse{}, fmt.Errorf("scraping failed: parent context expired during browser phase: %w", ctx.Err())
 	}
 
-	// Check if it's a Cloudflare block (typed verdict from Phase 2, or from Phase 1 when
-	// the browser could not get past it either)
+	// 451 only when the browser itself ended on a Cloudflare page. From datacenter
+	// IPs Phase 1 is challenged on every request to some sites while the browser
+	// gets through, so a Phase 1 challenge says nothing about why Phase 2 failed
 	var cfErr *models.CloudflareBlockError
-	if errors.As(err, &cfErr) || phase1CF != nil {
-		if cfErr == nil {
-			cfErr = &models.CloudflareBlockError{Domain: phase1CF.Domain, Kind: phase1CF.Kind, Status: phase1CF.Status, RayID: phase1CF.RayID, Err: err}
-		}
+	if errors.As(err, &cfErr) {
 		fmt.Printf("Detected Cloudflare %s for domain: %s\n", cfErr.Kind, cfErr.Domain)
 		return models.ScrapeResponse{Images: []models.Image{}}, cfErr
+	}
+	if phase1CF != nil {
+		return models.ScrapeResponse{}, fmt.Errorf("scraping failed - HTTP phase was challenged by Cloudflare, browser phase failed: %w", err)
 	}
 
 	// Combine errors from both phases for better context

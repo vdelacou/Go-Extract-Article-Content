@@ -753,10 +753,6 @@ func (b *BrowserClient) retryNavigation(ctx context.Context, targetURL string, m
 			fmt.Printf("Retrying 404 past the cache: %s\n", navURL)
 		}
 		snapshots, url, err := b.captureHTMLSnapshots(ctx, navURL)
-		if errors.Is(err, errChromeErrorPage) {
-			// Unreachable host or rejected certificate: retrying won't help
-			return nil, url, err
-		}
 
 		// Collect all snapshots
 		allSnapshots = append(allSnapshots, snapshots...)
