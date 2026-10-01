@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"fmt"
+	"html"
 	"strings"
 
 	"extract-html-scraper/internal/models"
@@ -139,8 +140,9 @@ func (ae *ArticleExtractor) sanitizeText(text string) string {
 		return ""
 	}
 
-	// Use bluemonday to sanitize HTML if present
-	sanitized := ae.sanitizer.Sanitize(text)
+	// Use bluemonday to sanitize HTML if present. It returns HTML-escaped
+	// output, so decode it back to plain text: ' rather than &#39;
+	sanitized := html.UnescapeString(ae.sanitizer.Sanitize(text))
 
 	// Additional cleanup using our helper
 	return CleanWhitespace(sanitized)
@@ -343,6 +345,7 @@ func (ae *ArticleExtractor) ExtractArticleSimple(html, baseURL string) models.Sc
 // 2. Full extraction with readability (ExtractArticle)
 // 3. Simple extraction (ExtractArticleSimple)
 // 4. Metadata-only extraction (at least get title/description)
+// 5. Remix hydration payload, when every other strategy found no body
 // Returns the result with highest quality score
 func (ae *ArticleExtractor) ExtractArticleWithMultipleStrategies(html, baseURL string) models.ScrapeResponse {
 	var results []models.ScrapeResponse
@@ -433,6 +436,28 @@ func (ae *ArticleExtractor) ExtractArticleWithMultipleStrategies(html, baseURL s
 		strategies = append(strategies, "metadata-only")
 		fmt.Printf("Strategy 3 result: title=%d chars, description=%d chars\n",
 			len(result3.Title), len(result3.Description))
+	}
+
+	// Strategy 4: Remix / React Router hydration payload, for apps that ship an
+	// empty <body> and keep the article in a turbo-stream (pandaily.com)
+	thin := true
+	for _, r := range results {
+		if len(r.Content) >= ThinContentChars {
+			thin = false
+			break
+		}
+	}
+	if thin {
+		if article, ok := ExtractRemixArticle(html, baseURL); ok {
+			result4 := ae.ExtractArticle(injectArticleIntoBody(html, article), baseURL)
+			if result4.Title == "" {
+				result4.Title = ae.sanitizeText(article.Title)
+			}
+			results = append(results, result4)
+			strategies = append(strategies, "remix-payload")
+			fmt.Printf("Strategy 4 result: title=%d chars, content=%d chars, quality=%d\n",
+				len(result4.Title), len(result4.Content), result4.Quality.Score)
+		}
 	}
 
 	// Select best result based on quality score and content length

@@ -1,0 +1,23 @@
+HTTP/2 200 
+date: Thu, 01 Oct 2026 14:58:25 GMT
+content-type: text/html; charset=UTF-8
+cf-ray: a43c534edd940a26-ORD
+cf-cache-status: HIT
+age: 42911
+cache-control: max-age=600, must-revalidate
+last-modified: Mon, 28 Sep 2026 15:49:02 GMT
+link: <https://www.tvinsider.com/wp-json/>; rel="https://api.w.org/", <https://www.tvinsider.com/wp-json/wp/v2/posts/1215678>; rel="alternate"; title="JSON"; type="application/json", <https://www.tvinsider.com/?p=1215678>; rel=shortlink
+server: cloudflare
+vary: Accept-Encoding, Accept-Encoding,Cookie
+cf-apo-via: tcache
+cf-edge-cache: cache,platform=wordpress
+x-cache: HIT: 1
+x-cache-group: normal
+x-cacheable: YES:600.000
+x-frame-options: SAMEORIGIN
+x-powered-by: WP Engine
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=gT8Tus0UxWqEz72wEgVgSyQXBxJHh58KPLCpQNkeDlwGtKsCZ0aLmY06cChYRgz9jwJUywUNzsjcUDxQxO6gYuZgph4pU01GPXeDSlV60%2FmNoNqzcFQIO6ht8RXF1Y3LhcbP"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+content-encoding: br
+alt-svc: h3=":443"; ma=86400
+

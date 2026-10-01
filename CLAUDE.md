@@ -137,10 +137,13 @@ See `scraper.go:31-51` for the timeout budget calculation logic.
 
 ### Cloudflare Detection
 
-Cloudflare blocking is detected via regex patterns (config.go:102) and returned as HTTP 451 with structured error response. The system checks for:
-- "attention required", "cloudflare ray id"
-- "verify you are human", "checking your browser"
-- Other common challenge page indicators
+Cloudflare challenge and block pages are detected in `internal/scraper/cfdetect.go` and returned as HTTP 451 with a structured error response. Both phases share the detector. Phase 1 also reads the response headers. It checks for:
+- the `cf-mitigated: challenge` response header
+- a "Just a moment..." or "Attention Required! | Cloudflare" title backed by a Cloudflare marker
+- `window._cf_chl_opt` or the challenge-platform orchestrate script, on small pages only
+- block pages (`cf-error-details` plus a block phrase such as error 1020)
+
+Normal pages that only load Cloudflare assets (email-decode, the insights beacon, the bot-management `jsd` script, cdnjs) are not blocks. Matching the bare word "cloudflare" sent cnevpost and SCMP down the slow browser path. Fixtures live in `internal/scraper/testdata/cloudflare`.
 
 ### Image Extraction
 
@@ -268,7 +271,7 @@ Key Go modules (see go.mod):
 
 **Changing extraction strategy:**
 - Edit `internal/scraper/extractor.go:ExtractArticleWithMultipleStrategies()`
-- The function tries 4 strategies in order: JSON-LD structured data, go-readability, custom selectors, metadata fallback
+- The function tries 5 strategies in order: JSON-LD structured data, go-readability, custom selectors, metadata fallback, Remix hydration payload
 - JSON-LD extraction (Strategy 0) provides fastest and most reliable extraction for news sites
 - Each strategy returns a quality score; highest quality wins
 - JSON-LD gets +10 quality bonus for reliability
@@ -312,5 +315,8 @@ Key Go modules (see go.mod):
 2. **Readability** - go-readability algorithm (good for most articles)
 3. **Simple** - Basic DOM selectors (fallback)
 4. **Metadata-only** - Last resort (title/description only)
+5. **Remix payload** - Only when every other strategy found under 500 chars: decodes the Remix/React Router hydration stream and takes the post whose slug matches the URL (`remix_stream.go`, used by pandaily.com)
+
+If Phase 1 still ends with a title but under 500 chars of body, ScrapeSmart tries the browser and keeps its result only when it has clearly more text under a matching title.
 
 For detailed information, see `SCMP_IMPROVEMENTS.md`

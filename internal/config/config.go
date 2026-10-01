@@ -95,13 +95,12 @@ func CompileRegexes() map[string]*regexp.Regexp {
 		"dimensionsFromUrl": regexp.MustCompile(`(?:^|[^\d])(\d{3,4})x(\d{3,4})(?:[^\d]|$)`),
 		"widthFromUrl":      regexp.MustCompile(`[?&](?:w|width)=(\d{3,4})\b`),
 		"heightFromUrl":     regexp.MustCompile(`[?&](?:h|height)=(\d{3,4})\b`),
-		"imageExt":          regexp.MustCompile(`\.(jpe?g|png|gif|webp|avif)(?:$|[?#])`),
+		"imageExt":          regexp.MustCompile(`(?i)\.(jpe?g|png|gif|webp|avif)(?:$|[?#])`), // GeekPark covers end in .JPEG
 		"ogImage":           regexp.MustCompile(`<meta[^>]*property=["']og:image(?::secure_url)?["'][^>]*content=["']([^"']+)["']`),
 		"ogWidth":           regexp.MustCompile(`<meta[^>]*property=["']og:image:width["'][^>]*content=["']([^"']+)["']`),
 		"ogHeight":          regexp.MustCompile(`<meta[^>]*property=["']og:image:height["'][^>]*content=["']([^"']+)["']`),
 		"articleTag":        regexp.MustCompile(`<(article|main)[\s>]`),
 		"closeArticleTag":   regexp.MustCompile(`</(article|main)>`),
-		"cfBlock":           regexp.MustCompile(`(attention required|cloudflare ray id|what can i do to resolve this\?|why have i been blocked\?|performance & security by cloudflare|verifying you are human|verify you are human|checking your browser|please wait while we verify|this may take a few seconds)`),
 		"appError":          regexp.MustCompile(`(?i)(application error|client-side exception|javascript error|an error occurred|something went wrong)`),
 	}
 }

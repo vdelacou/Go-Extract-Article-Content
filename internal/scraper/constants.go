@@ -46,6 +46,10 @@ const (
 	MaxRedirects        = 5
 )
 
+// ThinContentChars is the article length below which an extraction counts as
+// having found no body: only a title and description, a teaser or an error page
+const ThinContentChars = 500
+
 // Image processing constants
 const (
 	DefaultImageLimit = 3
@@ -65,22 +69,4 @@ var BlockedDomains = []string{
 	"scorecardresearch",
 	"chartbeat",
 	"amazon-adsystem",
-}
-
-// Cloudflare detection patterns
-var CloudflarePatterns = []string{
-	"CF_BLOCKED",
-	"cloudflare",
-	"HTTP 403",
-	"all alternate URLs failed",
-	"attention required",
-	"cloudflare ray id",
-	"what can i do to resolve this?",
-	"why have i been blocked?",
-	"performance & security by cloudflare",
-	"verifying you are human",
-	"verify you are human",
-	"checking your browser",
-	"please wait while we verify",
-	"this may take a few seconds",
 }

@@ -2,12 +2,16 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"extract-html-scraper/internal/config"
+	"extract-html-scraper/internal/models"
 
 	"github.com/chromedp/chromedp"
 )
@@ -15,6 +19,18 @@ import (
 type BrowserClient struct {
 	config  config.ScrapeConfig
 	regexes map[string]*regexp.Regexp
+}
+
+// errChromeErrorPage means Chrome rendered its own error page ("This site
+// can't be reached", a certificate interstitial) instead of the site
+var errChromeErrorPage = errors.New("browser showed its own error page: site unreachable or certificate rejected")
+
+// errPageNotFound means the site answered the main document with 404 or 410
+var errPageNotFound = errors.New("page not found")
+
+// isChromeErrorPage reports whether a page URL is one of Chrome's error pages
+func isChromeErrorPage(pageURL string) bool {
+	return strings.HasPrefix(pageURL, "chrome-error://")
 }
 
 func NewBrowserClient() *BrowserClient {
@@ -80,9 +96,11 @@ func (b *BrowserClient) scrapeWithOptions(ctx context.Context, targetURL string,
 	html, finalURL, err := b.navigateAndExtract(ctx, targetURL)
 	if err == nil && len(html) > 0 {
 		// Check for blocking first - this is a hard failure
-		if b.LooksLikeCFBlock(html) {
-			fmt.Printf("Primary URL blocked by site protection\n")
-			// Continue to alternates instead of returning error immediately
+		if v := DetectCloudflareHTML(html); v != CFNone {
+			// Same-site alternates sit behind the same Cloudflare zone rules: don't spend
+			// another 4 navigations on them
+			fmt.Printf("Primary URL is still a Cloudflare %s page; not trying alternates\n", v)
+			return "", "", cloudflareBrowserError(targetURL, v)
 		} else {
 			// Got HTML - return it (let extraction determine validity)
 			textLength := len(strings.TrimSpace(html))
@@ -95,6 +113,15 @@ func (b *BrowserClient) scrapeWithOptions(ctx context.Context, targetURL string,
 		if len(html) > 0 && !b.LooksLikeCFBlock(html) {
 			fmt.Printf("Using HTML despite navigation errors (graceful degradation)\n")
 			return html, finalURL, nil
+		}
+		if v := DetectCloudflareHTML(html); v != CFNone {
+			fmt.Printf("Primary URL is still a Cloudflare %s page; not trying alternates\n", v)
+			return "", "", cloudflareBrowserError(targetURL, v)
+		}
+		// The host itself could not be loaded, or the article isn't there: the
+		// AMP and m. variants would fail the same way
+		if errors.Is(err, errChromeErrorPage) || errors.Is(err, errPageNotFound) {
+			return "", "", err
 		}
 	} else {
 		fmt.Printf("Primary URL navigation returned empty HTML\n")
@@ -140,6 +167,16 @@ func (b *BrowserClient) scrapeWithOptions(ctx context.Context, targetURL string,
 		}
 
 	return "", "", fmt.Errorf("all URLs failed or were blocked")
+}
+
+// errCloudflarePersisted aborts the remaining capture phases when a Cloudflare
+// challenge did not resolve (or a block page was served)
+var errCloudflarePersisted = errors.New("cloudflare challenge persisted")
+
+// cloudflareBrowserError reports a Cloudflare page that the browser could not get past
+func cloudflareBrowserError(targetURL string, v CFVerdict) error {
+	u, _ := url.Parse(targetURL)
+	return &models.CloudflareBlockError{Domain: u.Hostname(), Kind: v.String(), Err: errors.New("browser: Cloudflare page persisted")}
 }
 
 // HTMLSnapshot represents a captured HTML at a specific point in time
@@ -455,10 +492,9 @@ func (b *BrowserClient) navigateAndExtractLegacy(ctx context.Context, targetURL 
 	return html, finalURL, nil
 }
 
-// LooksLikeCFBlock checks if HTML content indicates Cloudflare blocking
+// LooksLikeCFBlock checks if HTML content is a Cloudflare challenge/block page
 func (b *BrowserClient) LooksLikeCFBlock(html string) bool {
-	htmlLower := strings.ToLower(html)
-	return b.regexes["cfBlock"].MatchString(htmlLower)
+	return DetectCloudflareHTML(html) != CFNone
 }
 
 // LooksLikeChallengePage checks if HTML content indicates a challenge page
@@ -710,7 +746,17 @@ func (b *BrowserClient) retryNavigation(ctx context.Context, targetURL string, m
 			}
 		}
 
-		snapshots, url, err := b.captureHTMLSnapshots(ctx, targetURL)
+		navURL := targetURL
+		if errors.Is(lastErr, errPageNotFound) {
+			// The 404 may be a CDN's cached copy of a transient origin error
+			navURL = addCacheBuster(targetURL)
+			fmt.Printf("Retrying 404 past the cache: %s\n", navURL)
+		}
+		snapshots, url, err := b.captureHTMLSnapshots(ctx, navURL)
+		if errors.Is(err, errChromeErrorPage) {
+			// Unreachable host or rejected certificate: retrying won't help
+			return nil, url, err
+		}
 
 		// Collect all snapshots
 		allSnapshots = append(allSnapshots, snapshots...)
@@ -732,7 +778,8 @@ func (b *BrowserClient) retryNavigation(ctx context.Context, targetURL string, m
 		}
 
 		// Retry on timeout or network errors
-		shouldRetry := strings.Contains(errStr, "timeout") ||
+		shouldRetry := errors.Is(err, errPageNotFound) ||
+			strings.Contains(errStr, "timeout") ||
 			strings.Contains(errStr, "context deadline exceeded") ||
 			strings.Contains(errStr, "network") ||
 			strings.Contains(errStr, "connection") ||
@@ -799,9 +846,23 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 	}
 
 	// Navigate with timeout protection
-	err := b.navigateWithTimeout(ctx, targetURL, navTimeout)
+	status, err := b.navigateWithStatus(ctx, targetURL, navTimeout)
 	if err != nil {
 		fmt.Printf("Navigation had error (will try to capture anyway): %v\n", err)
+	}
+
+	// Chrome swaps in chrome-error://chromewebdata/ when it can't load the site;
+	// that page must never come back as the article
+	var navURL string
+	if chromedp.Run(ctx, chromedp.Location(&navURL)) == nil && isChromeErrorPage(navURL) {
+		fmt.Printf("Navigation landed on Chrome's error page: %v\n", err)
+		return nil, navURL, fmt.Errorf("%w (%v)", errChromeErrorPage, err)
+	}
+	// The site's own not-found page must not come back as the article either
+	// (pandaily renders it as a 341-character "Page Not Found" text)
+	if status == 404 || status == 410 {
+		fmt.Printf("Main document returned HTTP %d\n", status)
+		return nil, navURL, fmt.Errorf("%w: HTTP %d", errPageNotFound, status)
 	}
 
 	// Wait for DOMContentLoaded (faster than WaitReady("body"))
@@ -849,30 +910,43 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 
 		// Check for Cloudflare challenge (with adaptive timeout)
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			var bodyHTML string
-			if err := chromedp.OuterHTML("body", &bodyHTML).Do(ctx); err == nil {
-				if b.LooksLikeCFBlock(bodyHTML) {
-					// Adaptive wait based on remaining time
-					remainingTime := calculateRemainingTime(ctx)
-					cfWait := 30 * time.Second
-					if remainingTime < cfWait+5*time.Second {
-						cfWait = remainingTime - 5*time.Second
-						if cfWait < 5*time.Second {
-							cfWait = 5 * time.Second
-						}
-					}
-					fmt.Printf("Cloudflare challenge detected, waiting up to %v for resolution...\n", cfWait)
-					chromedp.Sleep(cfWait).Do(ctx)
-					// Re-check after wait
-					chromedp.OuterHTML("body", &bodyHTML).Do(ctx)
-					if b.LooksLikeCFBlock(bodyHTML) {
-						fmt.Printf("Challenge still present after %v wait\n", cfWait)
-					} else {
-						fmt.Printf("Challenge resolved after wait\n")
-					}
+			var docHTML string
+			if err := chromedp.OuterHTML("html", &docHTML).Do(ctx); err != nil {
+				return nil
+			}
+			v := DetectCloudflareHTML(docHTML)
+			if v == CFNone {
+				return nil
+			}
+			if v == CFBlocked {
+				fmt.Printf("Cloudflare block page detected; waiting will not help\n")
+				return errCloudflarePersisted
+			}
+			// Adaptive wait based on remaining time; poll so a solved challenge is picked up at once
+			remainingTime := calculateRemainingTime(ctx)
+			cfWait := 15 * time.Second
+			if remainingTime < cfWait+5*time.Second {
+				cfWait = remainingTime - 5*time.Second
+				if cfWait < 3*time.Second {
+					cfWait = 3 * time.Second
 				}
 			}
-			return nil
+			fmt.Printf("Cloudflare challenge detected, polling up to %v for resolution...\n", cfWait)
+			start := time.Now()
+			for time.Since(start) < cfWait {
+				if err := chromedp.Sleep(1 * time.Second).Do(ctx); err != nil {
+					return nil
+				}
+				if err := chromedp.OuterHTML("html", &docHTML).Do(ctx); err != nil {
+					continue // page is navigating away from the challenge
+				}
+				if DetectCloudflareHTML(docHTML) == CFNone {
+					fmt.Printf("Challenge resolved after %v\n", time.Since(start).Round(100*time.Millisecond))
+					return nil
+				}
+			}
+			fmt.Printf("Challenge still present after %v; skipping remaining browser phases\n", cfWait)
+			return errCloudflarePersisted
 		}),
 
 		// Phase 2: Wait for ready state (adaptive timeout based on remaining time)
@@ -1371,14 +1445,23 @@ func (b *BrowserClient) getBestHTML(snapshots []HTMLSnapshot) *HTMLSnapshot {
 	}
 
 	var best *HTMLSnapshot
-	bestPriority := -1
+	bestPriority := math.MinInt
 
 	for i := range snapshots {
 		snap := &snapshots[i]
 		priority := stagePriority[snap.Stage]
+		// A challenge snapshot taken before Cloudflare let the page through must
+		// not beat the page itself; it is kept only when nothing else was captured
+		if DetectCloudflareHTML(snap.HTML) != CFNone {
+			priority -= 100
+		}
 
 		// Skip if it's an application error or too small
 		if b.LooksLikeApplicationError(snap.HTML) && snap.Length < 1000 {
+			continue
+		}
+		// Chrome's own error pages are not the site's content
+		if isChromeErrorPage(snap.URL) {
 			continue
 		}
 
@@ -1397,30 +1480,38 @@ func (b *BrowserClient) getBestHTML(snapshots []HTMLSnapshot) *HTMLSnapshot {
 	return best
 }
 
-// navigateWithTimeout wraps chromedp.Navigate with a hard timeout
-// Returns error if navigation takes longer than maxWait, but ensures HTML can still be captured
-func (b *BrowserClient) navigateWithTimeout(ctx context.Context, url string, maxWait time.Duration) error {
+// navigateWithStatus wraps chromedp.Navigate with a hard timeout and returns the
+// main document's HTTP status (0 if unknown). A timeout is not an error, so HTML
+// can still be captured
+func (b *BrowserClient) navigateWithStatus(ctx context.Context, url string, maxWait time.Duration) (int64, error) {
 	navCtx, cancel := context.WithTimeout(ctx, maxWait)
 	defer cancel()
 
-	errChan := make(chan error, 1)
+	type navResult struct {
+		status int64
+		err    error
+	}
+	resultChan := make(chan navResult, 1)
 	go func() {
-		errChan <- chromedp.Run(navCtx, chromedp.Tasks{
-			chromedp.Navigate(url),
-		})
+		resp, err := chromedp.RunResponse(navCtx, chromedp.Navigate(url))
+		var status int64
+		if resp != nil {
+			status = resp.Status
+		}
+		resultChan <- navResult{status, err}
 	}()
 
 	select {
-	case err := <-errChan:
-		if err != nil && navCtx.Err() == context.DeadlineExceeded {
+	case result := <-resultChan:
+		if result.err != nil && navCtx.Err() == context.DeadlineExceeded {
 			fmt.Printf("Navigation timeout after %v (will try to capture HTML anyway)\n", maxWait)
 			// Don't return error - allow HTML capture to proceed
-			return nil
+			return result.status, nil
 		}
-		return err
+		return result.status, result.err
 	case <-ctx.Done():
 		cancel()
-		return ctx.Err()
+		return 0, ctx.Err()
 	}
 }
 
@@ -1512,7 +1603,7 @@ func (b *BrowserClient) minimalNavigation(ctx context.Context, targetURL string)
 	var snapshots []HTMLSnapshot
 
 	// Very quick navigation with timeout
-	_ = b.navigateWithTimeout(minCtx, targetURL, 10*time.Second)
+	_, _ = b.navigateWithStatus(minCtx, targetURL, 10*time.Second)
 	
 	// Quick DOMContentLoaded wait (or skip if time is low)
 	_ = b.waitForDOMContentLoaded(minCtx, 3*time.Second)
@@ -1641,7 +1732,7 @@ func (b *BrowserClient) waitForContentSelectors(ctx context.Context, maxWait tim
 				}
 			}
 			return false;
-		})(arguments[0]);
+		})
 	`
 
 	for {

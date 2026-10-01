@@ -1,0 +1,25 @@
+HTTP/2 200 
+date: Thu, 01 Oct 2026 14:58:26 GMT
+content-type: text/html; charset=utf-8
+cf-ray: a43c53561f8ae133-ORD
+cf-cache-status: HIT
+age: 29381
+last-modified: Thu, 01 Oct 2026 06:48:45 GMT
+server: cloudflare
+strict-transport-security: max-age=15552000; includeSubDomains; preload
+vary: Accept-Encoding
+cf-apo-via: tcache
+cf-edge-cache: cache,platform=wordpress
+expect-ct: max-age=86400, enforce
+permissions-policy: camera=(), microphone=(), geolocation=()
+referrer-policy: same-origin
+x-content-type-options: nosniff
+x-frame-options: SAMEORIGIN
+x-xss-protection: 1; mode=block
+server-timing: cfCacheStatus;desc="HIT"
+server-timing: cfEdge;dur=34,cfOrigin;dur=0
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=zuPMKxMkt%2FWRtkYdPOm8p87Fb4BgU6zBed%2F8tsJdxEgSlZQyKOwsOu0VEQAPqqQY%2BD0%2Fwwbsxvigmnuvf7hMi0%2FtbF26d1iukL1hULNxOJqfj584sAo%2BEsfNSwCinw%3D%3D"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+content-encoding: br
+alt-svc: h3=":443"; ma=86400
+

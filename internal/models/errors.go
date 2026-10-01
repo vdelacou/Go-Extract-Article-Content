@@ -6,12 +6,17 @@ import "fmt"
 // CloudflareBlockError represents a Cloudflare blocking error
 type CloudflareBlockError struct {
 	Domain string
+	Kind   string // "challenge" or "block"
+	Status int    // HTTP status of the challenge/block response (0 if unknown, e.g. browser DOM)
+	RayID  string
 	Err    error
 }
 
 func (e *CloudflareBlockError) Error() string {
-	return fmt.Sprintf("blocked by Cloudflare on domain %s: %v", e.Domain, e.Err)
+	return fmt.Sprintf("blocked by Cloudflare (%s, status %d, ray %s) on domain %s: %v", e.Kind, e.Status, e.RayID, e.Domain, e.Err)
 }
+
+func (e *CloudflareBlockError) Unwrap() error { return e.Err }
 
 // TimeoutError represents a timeout error
 type TimeoutError struct {

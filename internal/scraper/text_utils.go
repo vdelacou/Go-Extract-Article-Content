@@ -2,7 +2,10 @@
 package scraper
 
 import (
+	"errors"
 	"strings"
+
+	"extract-html-scraper/internal/models"
 )
 
 // CleanWhitespace removes excessive whitespace from text content
@@ -82,12 +85,12 @@ func ContainsAny(s string, substrings []string) bool {
 	return false
 }
 
-// IsCloudflareBlock checks if the error indicates Cloudflare blocking
+// IsCloudflareBlock reports whether err carries a Cloudflare challenge/block verdict.
+// It is type-based: error *strings* such as "HTTP 403" or anything containing the word
+// "cloudflare" are no longer treated as a Cloudflare block.
 func IsCloudflareBlock(err error) bool {
-	if err == nil {
-		return false
-	}
-	return ContainsAny(err.Error(), CloudflarePatterns)
+	var cf *models.CloudflareBlockError
+	return errors.As(err, &cf)
 }
 
 // BuildStructuredText extracts text content preserving structure from HTML elements

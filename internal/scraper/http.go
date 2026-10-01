@@ -2,16 +2,19 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"extract-html-scraper/internal/config"
+	"extract-html-scraper/internal/models"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -94,12 +97,25 @@ func (h *HTTPClient) FetchHTML(ctx context.Context, targetURL string, retryCount
 	}
 	defer resp.Body.Close()
 
-	// Handle 5xx server errors with retry logic
-	if resp.StatusCode >= 500 {
-		return h.retryWithBackoff(ctx, targetURL, retryCount)
-	}
-
 	if resp.StatusCode >= 400 {
+		// Classify Cloudflare challenge/block pages from a bounded prefix of the body
+		// before deciding to retry: a 503/403 challenge will not go away on retry.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if v := DetectCloudflare(resp.StatusCode, resp.Header, string(snippet)); v != CFNone {
+			return "", &models.CloudflareBlockError{
+				Domain: req.URL.Hostname(), Kind: v.String(), Status: resp.StatusCode,
+				RayID: cfRayID(resp.Header), Err: fmt.Errorf("HTTP %d", resp.StatusCode),
+			}
+		}
+		// A CDN can keep serving an origin's transient 404 for minutes (pandaily's
+		// origin sends max-age=300 on them); a unique query string skips that copy
+		if resp.StatusCode == http.StatusNotFound && retryCount == 0 && looksCDNServed(resp.Header) {
+			return h.retryUncached404(ctx, targetURL)
+		}
+		// Handle 5xx server errors with retry logic
+		if resp.StatusCode >= 500 {
+			return h.retryWithBackoff(ctx, targetURL, retryCount)
+		}
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
@@ -116,12 +132,55 @@ func (h *HTTPClient) FetchHTML(ctx context.Context, targetURL string, retryCount
 		return "", fmt.Errorf("failed to read response: %w", err)
 	}
 
+	if v := DetectCloudflare(resp.StatusCode, resp.Header, string(body)); v != CFNone {
+		return "", &models.CloudflareBlockError{
+			Domain: req.URL.Hostname(), Kind: v.String(), Status: resp.StatusCode,
+			RayID: cfRayID(resp.Header), Err: fmt.Errorf("HTTP %d with Cloudflare %s page", resp.StatusCode, v),
+		}
+	}
+
 	return string(body), nil
 }
 
-// LooksLikeCFBlock checks if HTML content indicates Cloudflare blocking
+// retryUncached404 refetches a CDN-served 404 past the cache, at once and again
+// after a pause, since the origin's 404s come in bursts of a few seconds
+func (h *HTTPClient) retryUncached404(ctx context.Context, targetURL string) (string, error) {
+	for _, delay := range []time.Duration{0, 3 * time.Second} {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", fmt.Errorf("HTTP 404")
+		}
+		html, err := h.FetchHTML(ctx, addCacheBuster(targetURL), 1)
+		if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+			return html, err
+		}
+	}
+	return "", fmt.Errorf("HTTP 404")
+}
+
+// looksCDNServed reports whether a response came through a caching CDN
+func looksCDNServed(header http.Header) bool {
+	return header.Get("Cf-Cache-Status") != "" || header.Get("Age") != "" ||
+		header.Get("X-Cache") != "" || strings.EqualFold(header.Get("Server"), "cloudflare")
+}
+
+// addCacheBuster adds a unique query parameter so a CDN treats the URL as new
+func addCacheBuster(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	q.Set("_cb", strconv.FormatInt(time.Now().UnixNano(), 36))
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// LooksLikeCFBlock checks if HTML content is a Cloudflare challenge/block page.
+// It must not match normal pages that merely reference Cloudflare assets.
 func (h *HTTPClient) LooksLikeCFBlock(html string) bool {
-	return IsCloudflareBlock(fmt.Errorf(html))
+	return DetectCloudflareHTML(html) != CFNone
 }
 
 // GenerateAlternateURLs creates alternative URLs for AMP/mobile fallback
@@ -253,6 +312,13 @@ func (h *HTTPClient) FetchWithAlternatesGroup(ctx context.Context, targetURL str
 		return html, targetURL, nil
 		}
 		// HTML is too short, likely not a real page - fall through to alternates
+	}
+
+	// A Cloudflare challenge/block applies to the whole zone: same-site alternates
+	// (/amp, ?outputType=amp, m.) get the same challenge, so return the typed error now.
+	var cfErr *models.CloudflareBlockError
+	if errors.As(err, &cfErr) {
+		return "", "", err
 	}
 
 	// Check if we should try alternates

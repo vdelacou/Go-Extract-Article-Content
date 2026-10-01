@@ -119,6 +119,24 @@ func TestExtractImagesFromHTMLGeekParkStyle(t *testing.T) {
 	}
 }
 
+func TestExtractImagesFromHTMLAcceptsUppercaseExtension(t *testing.T) {
+	// From http://www.geekpark.net/news/371040, whose only cover is a .JPEG
+	html := `
+		<html><head>
+		<meta content="https://imgslim.geekpark.net/uploads/image/file/b1/29/b1298a4d5ffba57e09b0e7a23bbb4f77.JPEG" name="og:image" />
+		</head><body>
+		<article><div id="article-body"><p>Text only.</p></div></article>
+		</body></html>
+	`
+
+	images := NewImageExtractor().ExtractImagesFromHTML(html, "http://www.geekpark.net/news/371040")
+
+	want := "https://imgslim.geekpark.net/uploads/image/file/b1/29/b1298a4d5ffba57e09b0e7a23bbb4f77.JPEG"
+	if len(images) != 1 || images[0].URL != want {
+		t.Fatalf("expected only the .JPEG og:image %s, got %+v", want, images)
+	}
+}
+
 func TestBadHintMatchesAdTermsOnlyAsTokens(t *testing.T) {
 	cases := []struct {
 		url  string

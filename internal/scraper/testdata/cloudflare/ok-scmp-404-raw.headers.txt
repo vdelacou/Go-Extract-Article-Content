@@ -1,0 +1,19 @@
+HTTP/2 404 
+date: Thu, 01 Oct 2026 14:59:52 GMT
+content-type: text/html; charset=utf-8
+last-modified: Thu, 01 Oct 2026 14:59:51 GMT
+vary: Accept-Encoding
+x-nextjs-cache: HIT
+x-url: /amp/tech/tech-trends/article/3367998/ant-international-embeds-ai-agents-across-all-platforms-biggest-ever-product-upgrade
+x-content-encoding: br
+x-cache-control: private, no-cache, no-store, max-age=0, must-revalidate
+cache-control: public, max-age=5
+x-hits: 0
+x-cached-by: production-varnish-scmp-pwa-v2-6886ff7654-snfzj
+expires: Thu, 01 Oct 2026 14:59:57 GMT
+cf-cache-status: EXPIRED
+content-encoding: br
+server: cloudflare
+cf-ray: a43c55686d98113a-ORD
+alt-svc: h3=":443"; ma=86400
+
