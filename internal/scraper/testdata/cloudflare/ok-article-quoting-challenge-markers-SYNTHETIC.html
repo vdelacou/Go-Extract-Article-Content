@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>How Cloudflare's challenge platform works</title>
+<script type="application/ld+json">{"@type":"BlogPosting","headline":"How Cloudflare's challenge platform works","description":"The page sets window._cf_chl_opt = { cType: 'managed' } and loads /cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1."}</script>
+</head><body><article>
+<h1>How Cloudflare's challenge platform works</h1>
+<p>Open the source of a "Just a moment..." page and the first inline script is the configuration object:</p>
+<pre><code>(function(){window._cf_chl_opt = {cFPWv: 'b', cType: 'managed'};
+var a = document.createElement('script');
+a.src = '/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=0';
+document.getElementsByTagName('head')[0].appendChild(a);}());</code></pre>
+<p>The orchestrate script at /cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1 then runs the managed challenge.</p>
+</article></body></html>

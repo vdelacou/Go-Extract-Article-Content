@@ -44,7 +44,12 @@ var (
 	// Orchestrate script of the challenge platform (chl_page, jsch, managed, captcha).
 	// NOTE: normal pages load /cdn-cgi/challenge-platform/scripts/jsd/main.js (or
 	// /cdn-cgi/challenge-platform/h/<x>/scripts/jsd/...) - that is bot management telemetry, NOT a challenge.
-	cfOrchestrateRe = regexp.MustCompile(`/cdn-cgi/challenge-platform/h/[a-z]/orchestrate/`)
+	cfOrchestrateRe    = regexp.MustCompile(`/cdn-cgi/challenge-platform/h/[a-z]/orchestrate/`)
+	cfOrchestrateSrcRe = regexp.MustCompile(`(?i)<script[^>]+src=["'][^"']*/cdn-cgi/challenge-platform/h/[a-z]/orchestrate/`)
+	// The challenge's inline configuration object
+	cfChlOptRe = regexp.MustCompile(`window\._cf_chl_opt\s*=\s*\{`)
+	cfScriptRe = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script>`)
+	cfTypeRe   = regexp.MustCompile(`(?i)\btype\s*=\s*["']?([^"'\s>]+)`)
 )
 
 // Phrases that, together with id="cf-error-details", identify a Cloudflare *block* page
@@ -110,7 +115,7 @@ func DetectCloudflareHTML(html string) CFVerdict {
 	if len(html) > cfMaxInspectBytes {
 		return CFNone
 	}
-	if strings.Contains(html, "window._cf_chl_opt") || cfOrchestrateRe.MatchString(html) {
+	if hasChallengeScript(html) {
 		return CFChallenge
 	}
 	lower := strings.ToLower(html)
@@ -130,4 +135,26 @@ func cfRayID(header http.Header) string {
 		return ""
 	}
 	return header.Get("Cf-Ray")
+}
+
+// hasChallengeScript reports whether the page runs Cloudflare's challenge: the
+// orchestrate script as a script src, or the challenge config and loader in an
+// executable inline script. Text and data scripts (JSON-LD) that quote them
+// don't count
+func hasChallengeScript(html string) bool {
+	if cfOrchestrateSrcRe.MatchString(html) {
+		return true
+	}
+	for _, m := range cfScriptRe.FindAllStringSubmatch(html, -1) {
+		if t := cfTypeRe.FindStringSubmatch(m[1]); t != nil {
+			typ := strings.ToLower(t[1])
+			if typ != "text/javascript" && typ != "module" && typ != "application/javascript" {
+				continue
+			}
+		}
+		if cfChlOptRe.MatchString(m[2]) || cfOrchestrateRe.MatchString(m[2]) {
+			return true
+		}
+	}
+	return false
 }

@@ -165,15 +165,20 @@ func looksCDNServed(header http.Header) bool {
 		header.Get("X-Cache") != "" || strings.EqualFold(header.Get("Server"), "cloudflare")
 }
 
-// addCacheBuster adds a unique query parameter so a CDN treats the URL as new
+// addCacheBuster adds a unique query parameter so a CDN treats the URL as new.
+// The existing query is kept byte for byte: re-encoding it would drop
+// ';'-separated pairs and turn "?flag" into "?flag="
 func addCacheBuster(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return raw
 	}
-	q := u.Query()
-	q.Set("_cb", strconv.FormatInt(time.Now().UnixNano(), 36))
-	u.RawQuery = q.Encode()
+	buster := "_cb=" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if u.RawQuery == "" {
+		u.RawQuery = buster
+	} else {
+		u.RawQuery += "&" + buster
+	}
 	return u.String()
 }
 

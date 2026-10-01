@@ -65,6 +65,8 @@ func TestDetectCloudflareFixtures(t *testing.T) {
 		{"ok-tvinsider-chrome-dom.html", 200, CFNone},
 		{"ok-origin-error-522-SYNTHETIC.html", 522, CFNone},
 		{"ok-article-about-cloudflare-SYNTHETIC.html", 200, CFNone},
+		// Quotes the challenge's script and config in <pre>, <p> and JSON-LD
+		{"ok-article-quoting-challenge-markers-SYNTHETIC.html", 200, CFNone},
 	}
 	for _, tc := range cases {
 		t.Run(tc.file, func(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -109,5 +110,50 @@ func TestExtractArticleRecoversPandailyBody(t *testing.T) {
 	}
 	if len(got.Images) == 0 || got.Images[0].URL != "https://cms-image.pandaily.com/1/unitree_g1_sparring_de412e8609.png" {
 		t.Errorf("expected the og:image first, got %+v", got.Images)
+	}
+}
+
+func TestExtractRemixArticleHandlesSharedAndCyclicData(t *testing.T) {
+	body := "<p>" + strings.Repeat("Body text. ", 30) + "</p>"
+	// The post sits at index 4 and is referenced from loaderData.post, from
+	// loaderData.seo.article and from its own "self" field
+	stream, _ := json.Marshal([]interface{}{
+		map[string]int{"_1": 2},           // 0: root
+		"loaderData",                      // 1
+		map[string]int{"_3": 4, "_9": 10}, // 2: {post, seo}
+		"post",                            // 3
+		map[string]int{"_5": 6, "_7": 8, "_11": 4}, // 4: {slug, content, self}
+		"slug", "shared-slug", // 5, 6
+		"content", body, // 7, 8
+		"seo",                    // 9
+		map[string]int{"_12": 4}, // 10: {article: post}
+		"self",                   // 11
+		"article",                // 12
+	})
+	arg, _ := json.Marshal(string(stream))
+	page := `<script>window.__remixContext.streamController.enqueue(` + string(arg) + `);</script>`
+
+	done := make(chan bool, 1)
+	go func() {
+		_, ok := ExtractRemixArticle(page, "https://example.com/shared-slug")
+		done <- ok
+	}()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("a post reached by several paths should be found once")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("walk did not finish on cyclic data")
+	}
+}
+
+func TestInjectArticleIntoBodyKeepsOffsetsWithNonASCIIHead(t *testing.T) {
+	// Lowercasing İ shortens it by a byte, which used to shift the insertion point
+	page := `<html><head><title>İstanbul İzmir İHA</title></head><BODY class="dura"><div id="root"></div></BODY></html>`
+	got := injectArticleIntoBody(page, RemixArticle{Title: "İstanbul", BodyHTML: "<p>Text</p>"})
+	want := `<BODY class="dura"><article><h1>İstanbul</h1><p>Text</p></article><div id="root">`
+	if !strings.Contains(got, want) {
+		t.Fatalf("article not placed right after <body>:\n%s", got)
 	}
 }

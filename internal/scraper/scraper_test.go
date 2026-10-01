@@ -14,10 +14,11 @@ import (
 func TestBrowserResultBetter(t *testing.T) {
 	body := strings.Repeat("The robot sparred without teleoperation. ", 40)
 	cases := []struct {
-		name    string
-		phase1  models.ScrapeResponse
-		browser models.ScrapeResponse
-		want    bool
+		name     string
+		phase1   models.ScrapeResponse
+		browser  models.ScrapeResponse
+		docTitle string // the browser document's <title>
+		want     bool
 	}{
 		{
 			name:    "browser found the body of the same story",
@@ -55,10 +56,17 @@ func TestBrowserResultBetter(t *testing.T) {
 			browser: models.ScrapeResponse{Title: "页面不存在", Content: body},
 			want:    false,
 		},
+		{
+			name:     "site-name title from the server, headline set in the browser",
+			phase1:   models.ScrapeResponse{Title: "City Times"},
+			browser:  models.ScrapeResponse{Title: "Council approves protected bike lanes on Main Street", Content: body},
+			docTitle: "Council approves protected bike lanes on Main Street | City Times",
+			want:     true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := browserResultBetter(tc.phase1, tc.browser); got != tc.want {
+			if got := browserResultBetter(tc.phase1, tc.browser, tc.docTitle); got != tc.want {
 				t.Errorf("browserResultBetter = %v, want %v (overlap %.2f)", got, tc.want, titleOverlap(tc.phase1.Title, tc.browser.Title))
 			}
 		})
@@ -89,6 +97,14 @@ func articlePage(title string) string {
 	paragraph := "<p>The humanoid robot sparred with a person for three rounds and adjusted its stance after every exchange, without remote control.</p>"
 	return `<html><head><meta property="og:title" content="` + title + `" /></head><body><article>` +
 		strings.Repeat(paragraph, 8) + `</article></body></html>`
+}
+
+// shortStaticPage is a brief served whole by the server
+func shortStaticPage(title string) string {
+	return `<html><head><meta property="og:title" content="` + title + `" /></head><body>
+		<nav><a href="/">Home</a> <a href="/tech">Tech</a> <a href="/ev">EV</a></nav>
+		<article><p>The robot sparred for three rounds without remote control, the company said on Monday.</p></article>
+		<footer>Copyright 2026 Example News. All rights reserved.</footer></body></html>`
 }
 
 // thinPage is what a client-rendered site serves: metadata and an empty body
@@ -137,6 +153,13 @@ func TestScrapeSmartPhaseDecisions(t *testing.T) {
 			renderer:    &fakeRenderer{html: articlePage("Pandaily - China Tech News, AI & Electric Vehicle Insights")},
 			wantTitle:   story,
 			wantBrowser: 1,
+		},
+		{
+			name:        "short static article never starts the browser",
+			fetcher:     fakeFetcher{html: shortStaticPage(story)},
+			renderer:    &fakeRenderer{html: articlePage(story)},
+			wantTitle:   story,
+			wantBrowser: 0,
 		},
 		{
 			name:        "thin Phase 1 is kept when the browser fails",
@@ -195,5 +218,25 @@ func TestScrapeSmartPhaseDecisions(t *testing.T) {
 				t.Errorf("content is %d chars, want body %v", len(got.Content), tc.wantBody)
 			}
 		})
+	}
+}
+
+func TestLooksClientRendered(t *testing.T) {
+	pandaily := readPandailyFixture(t, "unitree-g1-200.html")
+	cases := []struct {
+		name string
+		page string
+		want bool
+	}{
+		{"Remix page with an empty body", pandaily, true},
+		{"empty mount node", thinPage("Story"), true},
+		{"Next.js payload", `<html><body><nav>Home News Sport Weather and many more sections</nav><script id="__NEXT_DATA__" type="application/json">{}</script></body></html>`, true},
+		{"short static article", shortStaticPage("Story"), false},
+		{"full article", articlePage("Story"), false},
+	}
+	for _, tc := range cases {
+		if got := looksClientRendered(tc.page); got != tc.want {
+			t.Errorf("%s: looksClientRendered = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

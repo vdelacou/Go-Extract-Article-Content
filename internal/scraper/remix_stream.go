@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -147,7 +148,10 @@ func ExtractRemixArticle(page, pageURL string) (RemixArticle, bool) {
 		return RemixArticle{}, false
 	}
 
+	// turbo-stream encodes a value used twice as a reference, so the decoded
+	// tree shares maps and slices and can loop: visit each one once
 	var found []RemixArticle
+	visited := map[uintptr]bool{}
 	var walk func(o interface{}, depth int)
 	walk = func(o interface{}, depth int) {
 		if depth > 60 {
@@ -155,6 +159,11 @@ func ExtractRemixArticle(page, pageURL string) (RemixArticle, bool) {
 		}
 		switch v := o.(type) {
 		case map[string]interface{}:
+			if id := reflect.ValueOf(v).Pointer(); visited[id] {
+				return
+			} else {
+				visited[id] = true
+			}
 			if slug, ok := v["slug"].(string); ok && slugs[lastPathSegment("/"+strings.Trim(slug, "/"))] {
 				if a, ok := remixArticleFrom(v); ok {
 					found = append(found, a)
@@ -164,6 +173,14 @@ func ExtractRemixArticle(page, pageURL string) (RemixArticle, bool) {
 				walk(val, depth+1)
 			}
 		case []interface{}:
+			if len(v) == 0 {
+				return
+			}
+			if id := reflect.ValueOf(v).Pointer(); visited[id] {
+				return
+			} else {
+				visited[id] = true
+			}
 			for _, val := range v {
 				walk(val, depth+1)
 			}
@@ -205,6 +222,8 @@ func remixArticleFrom(v map[string]interface{}) (RemixArticle, bool) {
 	return a, true
 }
 
+var bodyOpenTagRe = regexp.MustCompile(`(?i)<body\b[^>]*>`)
+
 // injectArticleIntoBody puts the recovered article right after <body> so the
 // normal readability and image pipeline runs on it, with the head metadata kept
 func injectArticleIntoBody(page string, a RemixArticle) string {
@@ -214,17 +233,12 @@ func injectArticleIntoBody(page string, a RemixArticle) string {
 	}
 	article += a.BodyHTML + "</article>"
 
-	lower := strings.ToLower(page)
-	i := strings.Index(lower, "<body")
-	if i < 0 {
+	// Match on the page itself: lowercasing can change byte offsets (İ becomes i)
+	loc := bodyOpenTagRe.FindStringIndex(page)
+	if loc == nil {
 		return page + article
 	}
-	j := strings.Index(lower[i:], ">")
-	if j < 0 {
-		return page + article
-	}
-	k := i + j + 1
-	return page[:k] + article + page[k:]
+	return page[:loc[1]] + article + page[loc[1]:]
 }
 
 var canonicalRe = regexp.MustCompile(`<link[^>]+rel="canonical"[^>]+href="([^"]+)"`)

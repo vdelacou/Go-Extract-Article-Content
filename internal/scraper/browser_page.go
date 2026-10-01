@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
@@ -47,6 +48,51 @@ func enableNetworkBlocking(ctx context.Context, opts BrowserOptions) error {
 	return chromedp.Run(ctx, network.Enable(), network.SetBlockedURLS(blockedURLPatterns(opts)))
 }
 
+// requestTracker counts the page's own fetch and XHR requests still in flight,
+// from CDP network events, so waits can tell a page that is still loading its
+// article from one that has settled. It doesn't touch the page's JavaScript
+type requestTracker struct {
+	mu      sync.Mutex
+	pending map[network.RequestID]bool
+}
+
+type requestTrackerKey struct{}
+
+// trackRequests starts counting requests on the tab in ctx and returns a
+// context that carries the tracker
+func trackRequests(ctx context.Context) context.Context {
+	tracker := &requestTracker{pending: map[network.RequestID]bool{}}
+	chromedp.ListenTarget(ctx, tracker.observe)
+	return context.WithValue(ctx, requestTrackerKey{}, tracker)
+}
+
+func (t *requestTracker) observe(ev interface{}) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch e := ev.(type) {
+	case *network.EventRequestWillBeSent:
+		if e.Type == network.ResourceTypeXHR || e.Type == network.ResourceTypeFetch {
+			t.pending[e.RequestID] = true
+		}
+	case *network.EventLoadingFinished:
+		delete(t.pending, e.RequestID)
+	case *network.EventLoadingFailed:
+		delete(t.pending, e.RequestID)
+	}
+}
+
+// inFlight returns the number of the page's requests still running, or 0
+// when ctx has no tracker
+func inFlight(ctx context.Context) int {
+	t, ok := ctx.Value(requestTrackerKey{}).(*requestTracker)
+	if !ok {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.pending)
+}
+
 // navigateNoWait starts a navigation and returns once the main document is
 // committed, without waiting for the load event
 func (b *BrowserClient) navigateNoWait(ctx context.Context, url string, maxWait time.Duration) error {
@@ -75,6 +121,16 @@ func (b *BrowserClient) documentStatus(ctx context.Context) int64 {
 		return nav && nav.responseStatus ? nav.responseStatus : 0;
 	})()`, &status))
 	return status
+}
+
+// landing reads where the tab ended up: its URL, the main document's HTTP
+// status (0 if unknown) and whether it is Chrome's own error page
+func (b *BrowserClient) landing(ctx context.Context) (string, int64, bool) {
+	var pageURL string
+	if chromedp.Run(ctx, chromedp.Location(&pageURL)) == nil && isChromeErrorPage(pageURL) {
+		return pageURL, 0, true
+	}
+	return pageURL, b.documentStatus(ctx), false
 }
 
 // captureInline snapshots the document, or returns nil if the page can't
@@ -114,15 +170,25 @@ var pageStateScript = func() string {
 			if (el) { article = Math.max(article, (el.textContent || '').trim().length); }
 		}
 		const body = document.body ? (document.body.innerText || '').length : 0;
-		return {ready: document.readyState, article: article, body: body};
+		const meta = document.querySelector('meta[http-equiv="refresh" i]');
+		const refresh = meta ? parseFloat(meta.content) : NaN;
+		return {ready: document.readyState, article: article, body: body, refresh: isNaN(refresh) ? -1 : refresh};
 	})()`, selectors)
 }()
 
 // pageState is the page's load state and text lengths, read in one round trip
 type pageState struct {
-	Ready   string `json:"ready"`
-	Article int    `json:"article"`
-	Body    int    `json:"body"`
+	Ready   string  `json:"ready"`
+	Article int     `json:"article"`
+	Body    int     `json:"body"`
+	Refresh float64 `json:"refresh"` // meta refresh delay in seconds, -1 if none
+	Pending int     `json:"-"`       // the page's fetch and XHR requests in flight
+}
+
+// settling reports whether the page is still fetching data or about to
+// redirect itself. Long refresh delays are periodic reloads, not redirects
+func (s pageState) settling() bool {
+	return s.Pending > 0 || (s.Refresh >= 0 && s.Refresh <= 5)
 }
 
 func (b *BrowserClient) readPageState(ctx context.Context) (pageState, error) {
@@ -130,6 +196,7 @@ func (b *BrowserClient) readPageState(ctx context.Context) (pageState, error) {
 	defer cancel()
 	var state pageState
 	err := chromedp.Run(stateCtx, chromedp.Evaluate(pageStateScript, &state))
+	state.Pending = inFlight(ctx)
 	return state, err
 }
 
@@ -143,13 +210,14 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// waitForArticleReady returns once an article container holds real text or
-// the document has finished loading with some body text
+// waitForArticleReady returns once an article container holds real text, or
+// the document has finished loading with some body text and is not still
+// fetching its content or about to redirect
 func (b *BrowserClient) waitForArticleReady(ctx context.Context, maxWait time.Duration) bool {
 	deadline := time.Now().Add(maxWait)
 	for {
 		if state, err := b.readPageState(ctx); err == nil {
-			if state.Article >= 500 || (state.Ready == "complete" && state.Body >= 200) {
+			if state.Article >= 500 || (state.Ready == "complete" && state.Body >= 200 && !state.settling()) {
 				return true
 			}
 		}
@@ -160,13 +228,15 @@ func (b *BrowserClient) waitForArticleReady(ctx context.Context, maxWait time.Du
 }
 
 // waitForTextStability waits until the visible text stops growing: two reads
-// in a row within 2% of the previous one
+// in a row within 2% of the previous one, with no request or redirect pending
 func (b *BrowserClient) waitForTextStability(ctx context.Context, maxWait time.Duration) bool {
 	deadline := time.Now().Add(maxWait)
 	previous, stableReads := -1, 0
 	for time.Now().Before(deadline) {
 		if state, err := b.readPageState(ctx); err == nil {
-			if previous > 0 {
+			if state.settling() {
+				stableReads = 0
+			} else if previous > 0 {
 				change := state.Body - previous
 				if change < 0 {
 					change = -change

@@ -83,3 +83,18 @@ func TestFetchPlain404IsNotRetried(t *testing.T) {
 		t.Fatalf("want one request and an error, got hits=%d err=%v", hits, err)
 	}
 }
+
+func TestAddCacheBusterKeepsTheQuery(t *testing.T) {
+	cases := map[string]string{
+		"https://pandaily.com/catl":            "https://pandaily.com/catl?_cb=",
+		"https://e.com/a?utm_source=rss_feed":  "https://e.com/a?utm_source=rss_feed&_cb=",
+		"https://e.com/view.php?id=5;page=2":   "https://e.com/view.php?id=5;page=2&_cb=",
+		"https://e.com/view?flag":              "https://e.com/view?flag&_cb=",
+		"https://e.com/a?q=caf%C3%A9#comments": "https://e.com/a?q=caf%C3%A9&_cb=",
+	}
+	for in, prefix := range cases {
+		if got := addCacheBuster(in); !strings.HasPrefix(got, prefix) {
+			t.Errorf("addCacheBuster(%q) = %q, want prefix %q", in, got, prefix)
+		}
+	}
+}

@@ -28,6 +28,10 @@ var errChromeErrorPage = errors.New("browser showed its own error page: site unr
 // errPageNotFound means the site answered the main document with 404 or 410
 var errPageNotFound = errors.New("page not found")
 
+// errOriginError means the site answered the main document with a 5xx error
+// page, such as Cloudflare's 52x pages when the origin behind it is down
+var errOriginError = errors.New("site returned a server error page")
+
 // isChromeErrorPage reports whether a page URL is one of Chrome's error pages
 func isChromeErrorPage(pageURL string) bool {
 	return strings.HasPrefix(pageURL, "chrome-error://")
@@ -85,6 +89,7 @@ func (b *BrowserClient) scrapeWithOptions(ctx context.Context, targetURL string,
 	if err := enableNetworkBlocking(ctx, opts); err != nil {
 		return "", "", fmt.Errorf("failed to set up request blocking: %w", err)
 	}
+	ctx = trackRequests(ctx)
 
 	// Try primary URL first with graceful degradation
 	html, finalURL, err := b.navigateAndExtract(ctx, targetURL)
@@ -114,7 +119,7 @@ func (b *BrowserClient) scrapeWithOptions(ctx context.Context, targetURL string,
 		}
 		// The host itself could not be loaded, or the article isn't there: the
 		// AMP and m. variants would fail the same way
-		if errors.Is(err, errChromeErrorPage) || errors.Is(err, errPageNotFound) {
+		if errors.Is(err, errChromeErrorPage) || errors.Is(err, errPageNotFound) || errors.Is(err, errOriginError) {
 			return "", "", err
 		}
 	} else {
@@ -846,16 +851,10 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 
 	// Chrome swaps in chrome-error://chromewebdata/ when it can't load the site;
 	// that page must never come back as the article
-	var navURL string
-	if chromedp.Run(ctx, chromedp.Location(&navURL)) == nil && isChromeErrorPage(navURL) {
+	navURL, status, chromeError := b.landing(ctx)
+	if chromeError {
 		fmt.Printf("Navigation landed on Chrome's error page: %v\n", err)
 		return nil, navURL, fmt.Errorf("%w (%v)", errChromeErrorPage, err)
-	}
-	// The site's own not-found page must not come back as the article either
-	// (pandaily renders it as a 341-character "Page Not Found" text)
-	if status := b.documentStatus(ctx); status == 404 || status == 410 {
-		fmt.Printf("Main document returned HTTP %d\n", status)
-		return nil, navURL, fmt.Errorf("%w: HTTP %d", errPageNotFound, status)
 	}
 
 	// The document is still loading: collect what it has so far
@@ -878,10 +877,42 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 	err2 := b.waitOutCloudflare(ctx, initialHTML)
 
 	if err2 == nil {
+		// The document as the server sent it, before scripts filled it in
+		landedHTML := initialHTML
+		if DetectCloudflareHTML(initialHTML) != CFNone {
+			// The challenge cleared and loaded the real document: judge that one
+			navURL, status, chromeError = b.landing(ctx)
+			if chromeError {
+				return nil, navURL, errChromeErrorPage
+			}
+			landedHTML = ""
+			if snap := b.captureInline(ctx, "after-challenge"); snap != nil {
+				landedHTML = snap.HTML
+			}
+		}
+		// A server error page is not the article
+		if status >= 500 {
+			fmt.Printf("Main document returned HTTP %d\n", status)
+			return nil, navURL, fmt.Errorf("%w: HTTP %d", errOriginError, status)
+		}
+
 		// Each step ends as soon as its condition holds
 		if !b.waitForArticleReady(ctx, 8*time.Second) {
 			fmt.Printf("No article text after 8s, capturing anyway\n")
 		}
+
+		// A 404 or 410 is the site saying the article isn't there, unless the
+		// server sent an app shell that then renders an article: single-page
+		// apps are often served from a 404 fallback. Pandaily's not-found page
+		// is client-rendered too, but only 294 chars of it render
+		if status == 404 || status == 410 {
+			state, stateErr := b.readPageState(ctx)
+			if stateErr != nil || !looksClientRendered(landedHTML) || state.Article < ThinContentChars {
+				fmt.Printf("Main document returned HTTP %d\n", status)
+				return nil, navURL, fmt.Errorf("%w: HTTP %d", errPageNotFound, status)
+			}
+		}
+
 		if b.handleConsentOnce(ctx) {
 			if snap := b.captureInline(ctx, "after-consent"); snap != nil {
 				afterConsentHTML = snap.HTML

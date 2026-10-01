@@ -7,12 +7,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
 	"extract-html-scraper/internal/models"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 // pageFetcher is the Phase 1 HTTP client
@@ -115,11 +119,12 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 				} else {
 					fmt.Printf("Phase 1: Extraction succeeded (strategy worked, title=%d, content=%d)\n",
 						len(result.Title), len(result.Content))
-					if len(result.Content) >= ThinContentChars || calculateRemainingTime(ctx) < thinPageBrowserBudget {
+					if len(result.Content) >= ThinContentChars || !looksClientRendered(html) ||
+						calculateRemainingTime(ctx) < thinPageBrowserBudget {
 						return result, nil
 					}
-					// A title without a body: the page is probably built in the browser
-					fmt.Printf("Phase 1: Only %d chars of article text, trying the browser\n", len(result.Content))
+					// A title without a body, on a page built in the browser
+					fmt.Printf("Phase 1: Only %d chars of article text on a client-rendered page, trying the browser\n", len(result.Content))
 					phase1Result = &result
 				}
 			}
@@ -185,7 +190,7 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 		} else {
 			fmt.Printf("Phase 2: Extraction successful (title=%d chars, content=%d chars, quality score=%d)\n",
 				len(result.Title), len(result.Content), result.Quality.Score)
-			if phase1Result != nil && !browserResultBetter(*phase1Result, result) {
+			if phase1Result != nil && !browserResultBetter(*phase1Result, result, documentTitle(html)) {
 				fmt.Printf("Phase 2: Result is no better than Phase 1's, keeping Phase 1\n")
 				return *phase1Result, nil
 			}
@@ -228,12 +233,50 @@ const thinPageBrowserBudget = 30 * time.Second
 
 // browserResultBetter reports whether the browser found the body Phase 1 missed:
 // clearly more text, under a title about the same story. A different title means
-// the browser got an error, 404 or interstitial page
-func browserResultBetter(phase1, browser models.ScrapeResponse) bool {
+// the browser got an error, 404 or interstitial page. The browser document's own
+// <title> counts too: client-rendered pages often serve the site name as the
+// title and set the headline in the browser
+func browserResultBetter(phase1, browser models.ScrapeResponse, browserDocTitle string) bool {
 	if len(browser.Content) < ThinContentChars || len(browser.Content) < 2*len(phase1.Content) {
 		return false
 	}
-	return titleOverlap(phase1.Title, browser.Title) >= 0.5
+	return titleOverlap(phase1.Title, browser.Title) >= 0.5 || titleOverlap(phase1.Title, browserDocTitle) >= 0.5
+}
+
+var (
+	titleTagRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	// Markers of pages whose article is built in the browser
+	clientAppMarkers = []string{"__remixContext", "__reactRouterContext", "__NEXT_DATA__", "self.__next_f", "window.__NUXT__", "ng-version="}
+	emptyMountRe     = regexp.MustCompile(`(?i)<div[^>]+id=["'](?:root|app|__next|__nuxt|svelte)["'][^>]*>\s*</div>`)
+)
+
+// documentTitle returns the page's <title> text
+func documentTitle(page string) string {
+	if m := titleTagRe.FindStringSubmatch(page); m != nil {
+		return strings.TrimSpace(html.UnescapeString(m[1]))
+	}
+	return ""
+}
+
+// looksClientRendered reports whether a page's article is probably built in
+// the browser: a framework payload, an empty mount node, or almost no text.
+// A short static article is not, and the browser would only add latency
+func looksClientRendered(page string) bool {
+	for _, marker := range clientAppMarkers {
+		if strings.Contains(page, marker) {
+			return true
+		}
+	}
+	if emptyMountRe.MatchString(page) {
+		return true
+	}
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(page))
+	if err != nil {
+		return false
+	}
+	body := doc.Find("body")
+	body.Find("script, style, noscript, template").Remove()
+	return len(strings.TrimSpace(body.Text())) < 50
 }
 
 // titleOverlap is the share of a's words that also appear in b. Each Han
