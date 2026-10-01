@@ -52,7 +52,9 @@ func BuildChromeOptions(opts BrowserOptions) []chromedp.ExecAllocatorOption {
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-web-security", true),
-		chromedp.Flag("disable-features", "VizDisplayCompositor,IsolateOrigins,site-per-process"),
+		// HttpsUpgrades: its 3 s fallback timer aborts http:// navigations to slow
+		// https hosts with net::ERR_BLOCKED_BY_CLIENT (GeekPark)
+		chromedp.Flag("disable-features", "VizDisplayCompositor,IsolateOrigins,site-per-process,HttpsUpgrades"),
 		chromedp.WindowSize(opts.WindowWidth, opts.WindowHeight),
 		// Enhanced stealth flags
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
@@ -102,124 +104,4 @@ func BuildChromeOptions(opts BrowserOptions) []chromedp.ExecAllocatorOption {
 	}
 
 	return chromeOpts
-}
-
-// GetRequestBlockingScript returns JavaScript for blocking unwanted requests
-func GetRequestBlockingScript(opts BrowserOptions) string {
-	script := `
-		const originalFetch = window.fetch;
-		const originalXHR = window.XMLHttpRequest;
-		
-		// Block ads and trackers
-		const blockedDomains = [
-			'doubleclick', 'googlesyndication', 'google-analytics',
-			'facebook.com/tr', 'taboola', 'outbrain', 'scorecardresearch',
-			'chartbeat', 'amazon-adsystem'
-		];
-		
-		// Override fetch
-		window.fetch = function(...args) {
-			const url = args[0];
-			if (typeof url === 'string' && blockedDomains.some(domain => url.includes(domain))) {
-				return Promise.reject(new Error('Blocked'));
-			}
-			return originalFetch.apply(this, args);
-		};
-		
-		// Override XMLHttpRequest
-		const originalOpen = XMLHttpRequest.prototype.open;
-		XMLHttpRequest.prototype.open = function(method, url, ...args) {
-			if (typeof url === 'string' && blockedDomains.some(domain => url.includes(domain))) {
-				throw new Error('Blocked');
-			}
-			return originalOpen.apply(this, [method, url, ...args]);
-		};
-		
-		// Enhanced anti-detection: Hide webdriver property completely
-		Object.defineProperty(navigator, 'webdriver', {
-			get: () => undefined,
-			configurable: true
-		});
-		
-		// Remove webdriver property if it exists
-		delete navigator.webdriver;
-		
-		// Spoof plugins
-		Object.defineProperty(navigator, 'plugins', {
-			get: () => [1, 2, 3, 4, 5],
-			configurable: true
-		});
-		
-		// Override permissions
-		const originalQuery = window.navigator.permissions.query;
-		window.navigator.permissions.query = (parameters) => (
-			parameters.name === 'notifications' ?
-				Promise.resolve({ state: Notification.permission }) :
-				originalQuery(parameters)
-		);
-		
-		// Chrome object
-		window.chrome = {
-			runtime: {},
-		};
-		
-		// Override languages
-		Object.defineProperty(navigator, 'languages', {
-			get: () => ['en-US', 'en'],
-			configurable: true
-		});
-		
-		// Canvas fingerprint randomization to prevent detection
-		const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-		HTMLCanvasElement.prototype.toDataURL = function(type) {
-			if (type === 'image/png' || type === undefined) {
-				const context = this.getContext('2d');
-				if (context) {
-					const imageData = context.getImageData(0, 0, Math.min(this.width, 100), Math.min(this.height, 100));
-					for (let i = 0; i < imageData.data.length; i += 4) {
-						if (Math.random() < 0.01) {
-							imageData.data[i] = Math.min(255, imageData.data[i] + Math.floor(Math.random() * 3) - 1);
-						}
-					}
-					context.putImageData(imageData, 0, 0);
-				}
-			}
-			return originalToDataURL.apply(this, arguments);
-		};
-		
-		// WebGL vendor spoofing
-		const getParameter = WebGLRenderingContext.prototype.getParameter;
-		WebGLRenderingContext.prototype.getParameter = function(parameter) {
-			if (parameter === 37445) return 'Intel Inc.';
-			if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-			return getParameter.apply(this, arguments);
-		};
-		
-		// Additional fingerprinting protection
-		Object.defineProperty(navigator, 'hardwareConcurrency', {
-			get: () => 8,
-			configurable: true
-		});
-		
-		Object.defineProperty(navigator, 'deviceMemory', {
-			get: () => 8,
-			configurable: true
-		});
-	`
-
-	if opts.Optimized {
-		script += `
-		// Block resource types for optimized mode
-		const originalCreateElement = document.createElement;
-		document.createElement = function(tagName) {
-			const element = originalCreateElement.call(this, tagName);
-			if (['img', 'link', 'style'].includes(tagName.toLowerCase())) {
-				element.style.display = 'none';
-			}
-			return element;
-		};
-		`
-	}
-
-	return script
 }

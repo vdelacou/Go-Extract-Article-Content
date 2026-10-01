@@ -58,15 +58,27 @@ const (
 	MaxDescriptionLen = 300
 )
 
-// Blocked domains for browser requests
+// Blocked domains for browser requests: ad auctions and analytics that hold
+// the page's load event without adding article text
 var BlockedDomains = []string{
 	"doubleclick",
 	"googlesyndication",
 	"google-analytics",
+	"googletagmanager",
+	"googleadservices",
+	"facebook.net",
 	"facebook.com/tr",
 	"taboola",
 	"outbrain",
 	"scorecardresearch",
 	"chartbeat",
 	"amazon-adsystem",
+	"adnxs",
+	"criteo",
+	"pubmatic",
+	"rubiconproject",
+	"hotjar",
+	"quantserve",
+	"adthrive",
+	"prebid",
 }

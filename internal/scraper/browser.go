@@ -80,15 +80,9 @@ func (b *BrowserClient) scrapeWithOptions(ctx context.Context, targetURL string,
 	}))
 	defer cancel()
 
-	// Set up request blocking
-	err := chromedp.Run(ctx, chromedp.Tasks{
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			return chromedp.Run(ctx, chromedp.Tasks{
-				chromedp.Evaluate(GetRequestBlockingScript(opts), nil),
-			})
-		}),
-	})
-	if err != nil {
+	// Set up request blocking at the network layer. This first Run also starts
+	// Chrome. A script evaluated here would be lost on navigation
+	if err := enableNetworkBlocking(ctx, opts); err != nil {
 		return "", "", fmt.Errorf("failed to set up request blocking: %w", err)
 	}
 
@@ -739,10 +733,8 @@ func (b *BrowserClient) retryNavigation(ctx context.Context, targetURL string, m
 			// Exponential backoff: 2s, 4s
 			backoff := time.Duration(1<<uint(attempt)) * time.Second
 			fmt.Printf("Retrying navigation (attempt %d/%d) after %v backoff...\n", attempt+1, maxRetries, backoff)
-			select {
-			case <-ctx.Done():
-				break
-			case <-time.After(backoff):
+			if !sleepCtx(ctx, backoff) {
+				break // out of time: keep what earlier attempts captured
 			}
 		}
 
@@ -822,10 +814,6 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 		fmt.Printf("No context deadline set\n")
 	}
 
-	// Calculate wait times
-	maxChallengeWait := b.calculateChallengeWait(ctx)
-	fmt.Printf("Max challenge wait: %v\n", maxChallengeWait)
-
 	// Variables to capture HTML inline during tasks
 	var initialHTML, afterConsentHTML, afterScrollHTML string
 	var currentURL string
@@ -841,11 +829,20 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 		}
 	}
 
-	// Navigate with timeout protection
-	status, err := b.navigateWithStatus(ctx, targetURL, navTimeout)
+	// Navigate with timeout protection. Return once the document is committed:
+	// ad stacks can hold the load event for 20 to 60 s after the article is in
+	// the DOM
+	err := b.navigateNoWait(ctx, targetURL, navTimeout)
 	if err != nil {
 		fmt.Printf("Navigation had error (will try to capture anyway): %v\n", err)
 	}
+
+	// Wait for DOMContentLoaded (faster than WaitReady("body"))
+	domWait := 5 * time.Second
+	if remainingTime < domWait+3*time.Second {
+		domWait = 3 * time.Second
+	}
+	domErr := b.waitForDOMContentLoaded(ctx, domWait)
 
 	// Chrome swaps in chrome-error://chromewebdata/ when it can't load the site;
 	// that page must never come back as the article
@@ -856,260 +853,54 @@ func (b *BrowserClient) captureHTMLSnapshots(ctx context.Context, targetURL stri
 	}
 	// The site's own not-found page must not come back as the article either
 	// (pandaily renders it as a 341-character "Page Not Found" text)
-	if status == 404 || status == 410 {
+	if status := b.documentStatus(ctx); status == 404 || status == 410 {
 		fmt.Printf("Main document returned HTTP %d\n", status)
 		return nil, navURL, fmt.Errorf("%w: HTTP %d", errPageNotFound, status)
 	}
 
-	// Wait for DOMContentLoaded (faster than WaitReady("body"))
-	domWait := 5 * time.Second
-	if remainingTime < domWait+3*time.Second {
-		domWait = 3 * time.Second
+	// The document is still loading: collect what it has so far
+	if domErr != nil {
+		periodicSnaps := b.captureHTMLPeriodically(ctx, 2*time.Second, 5*time.Second)
+		if len(periodicSnaps) > 0 {
+			snapshots = append(snapshots, periodicSnaps...)
+			fmt.Printf("Collected %d periodic snapshots during navigation\n", len(periodicSnaps))
+		}
 	}
-	_ = b.waitForDOMContentLoaded(ctx, domWait)
-	
-	// Try periodic capture during DOM wait (limited duration)
-	periodicSnaps := b.captureHTMLPeriodically(ctx, 2*time.Second, 5*time.Second)
-	if len(periodicSnaps) > 0 {
-		snapshots = append(snapshots, periodicSnaps...)
-		fmt.Printf("Collected %d periodic snapshots during navigation\n", len(periodicSnaps))
+
+	// Capture HTML right away, before any longer wait
+	if snap := b.captureInline(ctx, "initial"); snap != nil {
+		initialHTML, currentURL = snap.HTML, snap.URL
+		snapshots = append(snapshots, *snap)
+		fmt.Printf("Captured initial snapshot: %d chars\n", snap.Length)
 	}
-	
-	// Immediately capture HTML in separate operation (even if navigation had errors)
-	_ = chromedp.Run(ctx, chromedp.Tasks{
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			var html, url string
-			if err := chromedp.Location(&url).Do(ctx); err == nil {
-				if err := chromedp.OuterHTML("html", &html).Do(ctx); err == nil {
-					initialHTML = html
-					currentURL = url
-					textLength := len(strings.TrimSpace(html))
-					fmt.Printf("Captured initial snapshot: %d chars\n", textLength)
-					if textLength > 0 {
-						snapshots = append(snapshots, HTMLSnapshot{
-							HTML:      html,
-							URL:       url,
-							Timestamp: time.Now(),
-							Stage:     "initial",
-							Length:    textLength,
-						})
-					}
-				}
-			}
-			return nil
-		}),
-	})
 
-	// Now do the longer waits and processing in separate chromedp.Run
-	// This way if context expires, we already have the initial snapshot
-	err2 := chromedp.Run(ctx, chromedp.Tasks{
+	// Cloudflare challenge: poll until it clears, give up on a block
+	err2 := b.waitOutCloudflare(ctx, initialHTML)
 
-		// Check for Cloudflare challenge (with adaptive timeout)
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			var docHTML string
-			if err := chromedp.OuterHTML("html", &docHTML).Do(ctx); err != nil {
-				return nil
+	if err2 == nil {
+		// Each step ends as soon as its condition holds
+		if !b.waitForArticleReady(ctx, 8*time.Second) {
+			fmt.Printf("No article text after 8s, capturing anyway\n")
+		}
+		if b.handleConsentOnce(ctx) {
+			if snap := b.captureInline(ctx, "after-consent"); snap != nil {
+				afterConsentHTML = snap.HTML
+				snapshots = append(snapshots, *snap)
+				fmt.Printf("Captured after-consent snapshot: %d chars\n", snap.Length)
 			}
-			v := DetectCloudflareHTML(docHTML)
-			if v == CFNone {
-				return nil
-			}
-			if v == CFBlocked {
-				fmt.Printf("Cloudflare block page detected; waiting will not help\n")
-				return errCloudflarePersisted
-			}
-			// Adaptive wait based on remaining time; poll so a solved challenge is picked up at once
-			remainingTime := calculateRemainingTime(ctx)
-			cfWait := 15 * time.Second
-			if remainingTime < cfWait+5*time.Second {
-				cfWait = remainingTime - 5*time.Second
-				if cfWait < 3*time.Second {
-					cfWait = 3 * time.Second
-				}
-			}
-			fmt.Printf("Cloudflare challenge detected, polling up to %v for resolution...\n", cfWait)
-			start := time.Now()
-			for time.Since(start) < cfWait {
-				if err := chromedp.Sleep(1 * time.Second).Do(ctx); err != nil {
-					return nil
-				}
-				if err := chromedp.OuterHTML("html", &docHTML).Do(ctx); err != nil {
-					continue // page is navigating away from the challenge
-				}
-				if DetectCloudflareHTML(docHTML) == CFNone {
-					fmt.Printf("Challenge resolved after %v\n", time.Since(start).Round(100*time.Millisecond))
-					return nil
-				}
-			}
-			fmt.Printf("Challenge still present after %v; skipping remaining browser phases\n", cfWait)
-			return errCloudflarePersisted
-		}),
-
-		// Phase 2: Wait for ready state (adaptive timeout based on remaining time)
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			remainingTime := calculateRemainingTime(ctx)
-			maxWait := 10 * time.Second // Reduced default from 15s
-			// Reduce wait if we're low on time
-			if remainingTime < maxWait+5*time.Second {
-				maxWait = remainingTime - 5*time.Second
-				if maxWait < 2*time.Second {
-					maxWait = 2 * time.Second
-				}
-			}
-
-			var readyState string
-			deadline := time.Now().Add(maxWait)
-			for time.Now().Before(deadline) {
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-				}
-				if err := chromedp.Evaluate("document.readyState", &readyState).Do(ctx); err == nil {
-					if readyState == "complete" {
-						// Reduced JS execution wait
-						chromedp.Sleep(1 * time.Second).Do(ctx)
-						return nil
-					}
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
-			return nil
-		}),
-
-		// Phase 2.5: Wait for network idle (optional, skip if low on time)
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			remainingTime := calculateRemainingTime(ctx)
-			if remainingTime < 10*time.Second {
-				fmt.Printf("Skipping network idle wait (low time: %v)\n", remainingTime)
-				return nil
-			}
-			networkWait := 3 * time.Second // Reduced from 5s
-			if remainingTime < networkWait+3*time.Second {
-				networkWait = 2 * time.Second
-			}
-			b.waitForNetworkIdle(ctx, networkWait)
-			return nil // Non-critical, continue even if it fails
-		}),
-
-		// Phase 2.6: Wait for content selectors (optional, skip if low on time)
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			remainingTime := calculateRemainingTime(ctx)
-			if remainingTime < 10*time.Second {
-				fmt.Printf("Skipping content selector wait (low time: %v)\n", remainingTime)
-				return nil
-			}
-			contentWait := 10 * time.Second // Reduced from 15s
-			if remainingTime < contentWait+3*time.Second {
-				contentWait = 5 * time.Second
-				if remainingTime < contentWait+3*time.Second {
-					contentWait = 3 * time.Second
-				}
-			}
-			b.waitForContentSelectors(ctx, contentWait)
-			return nil // Non-critical, continue even if it fails
-		}),
-
-		// Phase 3: Handle consent dialogs
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			return b.handleConsentDialogs(ctx)
-		}),
-		chromedp.Sleep(500 * time.Millisecond),
-
-		// Capture after consent inline
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			var html, url string
-			if err := chromedp.Location(&url).Do(ctx); err == nil {
-				if err := chromedp.OuterHTML("html", &html).Do(ctx); err == nil {
-					afterConsentHTML = html
-					if url != "" {
-						currentURL = url
-					}
-					textLength := len(strings.TrimSpace(html))
-					fmt.Printf("Captured after-consent snapshot: %d chars\n", textLength)
-					if textLength > 0 {
-						snapshots = append(snapshots, HTMLSnapshot{
-							HTML:      html,
-							URL:       url,
-							Timestamp: time.Now(),
-							Stage:     "after-consent",
-							Length:    textLength,
-						})
-					}
-				}
-			}
-			return nil
-		}),
-
-		// Phase 4: Scroll to trigger lazy loading (optional - skip if low on time)
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			// Check if we have enough time for scrolling
-			remainingTime := calculateRemainingTime(ctx)
-			if remainingTime < 10*time.Second {
-				fmt.Printf("Skipping scroll phase due to low time budget (%v)\n", remainingTime)
-				return nil
-			}
-
-			// Scroll down gradually
-			for i := 0; i < 3; i++ {
-				// Check context before each scroll action
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-				}
-				chromedp.Evaluate(fmt.Sprintf("window.scrollTo(0, %d)", (i+1)*500), nil).Do(ctx)
-				chromedp.Sleep(500 * time.Millisecond).Do(ctx)
-			}
-			// Scroll back to top
-			chromedp.Evaluate("window.scrollTo(0, 0)", nil).Do(ctx)
-			chromedp.Sleep(500 * time.Millisecond).Do(ctx)
-			return nil
-		}),
-
-		// Capture after scroll inline
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			var html, url string
-			if err := chromedp.Location(&url).Do(ctx); err == nil {
-				if err := chromedp.OuterHTML("html", &html).Do(ctx); err == nil {
-					afterScrollHTML = html
-					if url != "" {
-						currentURL = url
-					}
-					textLength := len(strings.TrimSpace(html))
-					fmt.Printf("Captured after-scroll snapshot: %d chars\n", textLength)
-					if textLength > 0 {
-						snapshots = append(snapshots, HTMLSnapshot{
-							HTML:      html,
-							URL:       url,
-							Timestamp: time.Now(),
-							Stage:     "after-scroll",
-							Length:    textLength,
-						})
-					}
-				}
-			}
-			return nil
-		}),
-
-		// Phase 5: Wait for stability (captures inline during stability checks)
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			stableSnap := b.waitForContentStabilityInline(ctx, maxChallengeWait, &snapshots)
-			if stableSnap != nil {
-				fmt.Printf("Captured stable snapshot: %d chars\n", stableSnap.Length)
-			}
-			return nil
-		}),
-
-		// Final URL capture
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			chromedp.Location(&finalURL).Do(ctx)
-			if finalURL == "" {
-				finalURL = currentURL
-			}
-			return nil
-		}),
-	})
+		}
+		b.quickScroll(ctx)
+		stage := "stable"
+		if !b.waitForTextStability(ctx, 4*time.Second) {
+			stage = "stable-timeout"
+		}
+		if snap := b.captureInline(ctx, stage); snap != nil {
+			afterScrollHTML, currentURL = snap.HTML, snap.URL
+			snapshots = append(snapshots, *snap)
+			fmt.Printf("Captured %s snapshot: %d chars\n", stage, snap.Length)
+		}
+	}
+	finalURL = currentURL
 
 	// Combine errors from both navigation runs
 	if err != nil {
@@ -1453,7 +1244,7 @@ func (b *BrowserClient) getBestHTML(snapshots []HTMLSnapshot) *HTMLSnapshot {
 		}
 
 		// Skip if it's an application error or too small
-		if b.LooksLikeApplicationError(snap.HTML) && snap.Length < 1000 {
+		if snap.Length < 1000 && b.LooksLikeApplicationError(snap.HTML) {
 			continue
 		}
 		// Chrome's own error pages are not the site's content
@@ -1474,41 +1265,6 @@ func (b *BrowserClient) getBestHTML(snapshots []HTMLSnapshot) *HTMLSnapshot {
 	}
 
 	return best
-}
-
-// navigateWithStatus wraps chromedp.Navigate with a hard timeout and returns the
-// main document's HTTP status (0 if unknown). A timeout is not an error, so HTML
-// can still be captured
-func (b *BrowserClient) navigateWithStatus(ctx context.Context, url string, maxWait time.Duration) (int64, error) {
-	navCtx, cancel := context.WithTimeout(ctx, maxWait)
-	defer cancel()
-
-	type navResult struct {
-		status int64
-		err    error
-	}
-	resultChan := make(chan navResult, 1)
-	go func() {
-		resp, err := chromedp.RunResponse(navCtx, chromedp.Navigate(url))
-		var status int64
-		if resp != nil {
-			status = resp.Status
-		}
-		resultChan <- navResult{status, err}
-	}()
-
-	select {
-	case result := <-resultChan:
-		if result.err != nil && navCtx.Err() == context.DeadlineExceeded {
-			fmt.Printf("Navigation timeout after %v (will try to capture HTML anyway)\n", maxWait)
-			// Don't return error - allow HTML capture to proceed
-			return result.status, nil
-		}
-		return result.status, result.err
-	case <-ctx.Done():
-		cancel()
-		return 0, ctx.Err()
-	}
 }
 
 // waitForDOMContentLoaded waits for DOMContentLoaded event instead of full page load
@@ -1599,7 +1355,7 @@ func (b *BrowserClient) minimalNavigation(ctx context.Context, targetURL string)
 	var snapshots []HTMLSnapshot
 
 	// Very quick navigation with timeout
-	_, _ = b.navigateWithStatus(minCtx, targetURL, 10*time.Second)
+	_ = b.navigateNoWait(minCtx, targetURL, 10*time.Second)
 	
 	// Quick DOMContentLoaded wait (or skip if time is low)
 	_ = b.waitForDOMContentLoaded(minCtx, 3*time.Second)
