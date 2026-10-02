@@ -119,21 +119,28 @@ func TestExtractImagesFromHTMLGeekParkStyle(t *testing.T) {
 	}
 }
 
-func TestExtractImagesFromHTMLAcceptsUppercaseExtension(t *testing.T) {
-	// From http://www.geekpark.net/news/371040, whose only cover is a .JPEG
+// GeekPark 371040: the cover is only in a name= og:image with an upper-case .JPEG
+// extension, and the body images are feishu-image:// links no browser can load.
+func TestExtractImagesFromHTMLAcceptsUpperCaseExtension(t *testing.T) {
+	coverURL := "https://imgslim.geekpark.net/uploads/image/file/b1/29/b1298a4d5ffba57e09b0e7a23bbb4f77.JPEG"
 	html := `
 		<html><head>
-		<meta content="https://imgslim.geekpark.net/uploads/image/file/b1/29/b1298a4d5ffba57e09b0e7a23bbb4f77.JPEG" name="og:image" />
+		<meta content="` + coverURL + `" name="og:image" />
 		</head><body>
-		<article><div id="article-body"><p>Text only.</p></div></article>
+		<img id="topic-cover" src="` + coverURL + `" />
+		<article>
+			<div id="article-body">
+				<p>Body text.</p>
+				<img src="feishu-image://abc123" />
+			</div>
+		</article>
 		</body></html>
 	`
 
 	images := NewImageExtractor().ExtractImagesFromHTML(html, "http://www.geekpark.net/news/371040")
 
-	want := "https://imgslim.geekpark.net/uploads/image/file/b1/29/b1298a4d5ffba57e09b0e7a23bbb4f77.JPEG"
-	if len(images) != 1 || images[0].URL != want {
-		t.Fatalf("expected only the .JPEG og:image %s, got %+v", want, images)
+	if len(images) != 1 || images[0].URL != coverURL {
+		t.Fatalf("expected only the cover %s, got %v", coverURL, images)
 	}
 }
 

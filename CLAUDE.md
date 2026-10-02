@@ -55,7 +55,7 @@ export GOOGLE_CLOUD_PROJECT="your-project-id"
 ./test.sh "SERVICE_URL" "API_KEY" "https://example.com"
 
 # Test authenticated endpoint
-./test-authenticated.sh
+./test-authenticated.sh "SERVICE_URL" "API_KEY"
 
 # Manual test
 curl "https://your-service-url/?url=https://example.com&key=YOUR_API_KEY"
@@ -282,8 +282,8 @@ Key Go modules (see go.mod):
 
 **Modifying browser behavior:**
 - Chrome flags: `internal/scraper/browser_options.go:BuildChromeOptions()`
-- Resource blocking: `internal/scraper/browser_options.go:GetRequestBlockingScript()`
-- Blocked resource types: images, stylesheets, fonts, media, analytics, ads
+- Resource blocking: `internal/scraper/browser_page.go:blockedURLPatterns()` (CDP `Network.setBlockedURLs`), with ad and analytics hosts in `constants.go:BlockedDomains`
+- Blocked resource types: images, fonts, media, analytics, ads (Cloudflare's challenge hosts are never blocked)
 
 **Adding alternate URL patterns:**
 - Modify `internal/scraper/http.go:generateAlternateURLs()` to add new URL variants
@@ -321,6 +321,6 @@ Key Go modules (see go.mod):
 4. **Metadata-only** - Last resort (title/description only)
 5. **Remix payload** - Only when every other strategy found under 500 chars: decodes the Remix/React Router hydration stream and takes the post whose slug matches the URL (`remix_stream.go`, used by pandaily.com)
 
-If Phase 1 still ends with a title but under 500 chars of body, ScrapeSmart tries the browser and keeps its result only when it has clearly more text under a matching title.
+If Phase 1 ends with no article text, or with under 500 chars on a page built client-side (a Remix, Next, Nuxt or Astro payload, an empty mount node, or almost no body text), ScrapeSmart tries the browser. It keeps the browser's result only when it has article text where Phase 1 had none, or clearly more of it, under a matching title. `content` is always in the response, `""` when nothing was found, with `contentMissing: true`.
 
 For detailed information, see `SCMP_IMPROVEMENTS.md`

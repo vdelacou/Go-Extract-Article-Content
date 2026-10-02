@@ -105,7 +105,8 @@ func DetectCloudflareHTML(html string) CFVerdict {
 			// Title alone is strong, but require a Cloudflare marker so a page that is
 			// legitimately titled "Just a moment..." is not discarded.
 			if strings.Contains(html, "_cf_chl_opt") || strings.Contains(html, "challenges.cloudflare.com") ||
-				strings.Contains(html, "/cdn-cgi/challenge-platform/") {
+				strings.Contains(html, "/cdn-cgi/challenge-platform/") ||
+				strings.Contains(strings.ToLower(html), "enable javascript and cookies to continue") {
 				return CFChallenge
 			}
 		}

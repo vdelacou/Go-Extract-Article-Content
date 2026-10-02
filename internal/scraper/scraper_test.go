@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 func TestBrowserResultBetter(t *testing.T) {
 	body := strings.Repeat("The robot sparred without teleoperation. ", 40)
+	scored := models.Quality{Score: 80}
 	cases := []struct {
 		name     string
 		phase1   models.ScrapeResponse
@@ -23,43 +25,49 @@ func TestBrowserResultBetter(t *testing.T) {
 		{
 			name:    "browser found the body of the same story",
 			phase1:  models.ScrapeResponse{Title: "Unitree G1 Sparring Demo Uses UnifoLM-X2-1.0 World Model"},
-			browser: models.ScrapeResponse{Title: "Unitree G1 Sparring Demo Uses UnifoLM-X2-1.0 World Model - Pandaily", Content: body},
+			browser: models.ScrapeResponse{Title: "Unitree G1 Sparring Demo Uses UnifoLM-X2-1.0 World Model - Pandaily", Content: body, Quality: scored},
 			want:    true,
 		},
 		{
 			name:    "browser landed on the site's not-found page",
 			phase1:  models.ScrapeResponse{Title: "AgiBot Unveils GE-Act 2.0 Native World-Action Model"},
-			browser: models.ScrapeResponse{Title: "Pandaily - China Tech News, AI & Electric Vehicle Insights", Content: body},
+			browser: models.ScrapeResponse{Title: "Pandaily - China Tech News, AI & Electric Vehicle Insights", Content: body, Quality: scored},
 			want:    false,
 		},
 		{
-			name:    "browser text is still thin",
+			name:    "browser text that scores 0 is not article text",
 			phase1:  models.ScrapeResponse{Title: "Story"},
-			browser: models.ScrapeResponse{Title: "Story", Content: "Short teaser."},
+			browser: models.ScrapeResponse{Title: "Story", Content: "Menu"},
 			want:    false,
 		},
 		{
-			name:    "browser text is not clearly longer",
-			phase1:  models.ScrapeResponse{Title: "Story", Content: body[:400]},
-			browser: models.ScrapeResponse{Title: "Story", Content: body[:700]},
+			name:    "short browser text beats none",
+			phase1:  models.ScrapeResponse{Title: "Story"},
+			browser: models.ScrapeResponse{Title: "Story", Content: "A short brief on the story.", Quality: models.Quality{Score: 20}},
+			want:    true,
+		},
+		{
+			name:    "browser text is not clearly longer than Phase 1's",
+			phase1:  models.ScrapeResponse{Title: "Story", Content: body[:400], Quality: scored},
+			browser: models.ScrapeResponse{Title: "Story", Content: body[:700], Quality: scored},
 			want:    false,
 		},
 		{
 			name:    "Chinese titles compare by character",
 			phase1:  models.ScrapeResponse{Title: "李彦宏的长期主义，进入回报周期"},
-			browser: models.ScrapeResponse{Title: "李彦宏的长期主义，进入回报周期 | 极客公园", Content: body},
+			browser: models.ScrapeResponse{Title: "李彦宏的长期主义，进入回报周期 | 极客公园", Content: body, Quality: scored},
 			want:    true,
 		},
 		{
 			name:    "different Chinese story",
 			phase1:  models.ScrapeResponse{Title: "李彦宏的长期主义，进入回报周期"},
-			browser: models.ScrapeResponse{Title: "页面不存在", Content: body},
+			browser: models.ScrapeResponse{Title: "页面不存在", Content: body, Quality: scored},
 			want:    false,
 		},
 		{
 			name:     "site-name title from the server, headline set in the browser",
 			phase1:   models.ScrapeResponse{Title: "City Times"},
-			browser:  models.ScrapeResponse{Title: "Council approves protected bike lanes on Main Street", Content: body},
+			browser:  models.ScrapeResponse{Title: "Council approves protected bike lanes on Main Street", Content: body, Quality: scored},
 			docTitle: "Council approves protected bike lanes on Main Street | City Times",
 			want:     true,
 		},
@@ -238,5 +246,72 @@ func TestLooksClientRendered(t *testing.T) {
 		if got := looksClientRendered(tc.page); got != tc.want {
 			t.Errorf("%s: looksClientRendered = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestHasArticleText(t *testing.T) {
+	cases := []struct {
+		name   string
+		result models.ScrapeResponse
+		want   bool
+	}{
+		// pandaily: title and images from the static HTML, body rendered client-side
+		{"title only", models.ScrapeResponse{Title: "Meituan LongCat 2.5 preview"}, false},
+		{"text scored 0", models.ScrapeResponse{Content: "Menu", Quality: models.Quality{Score: 0}}, false},
+		{"article", models.ScrapeResponse{Content: "Meituan released a preview.", Quality: models.Quality{Score: 60}}, true},
+	}
+
+	for _, c := range cases {
+		if got := hasArticleText(c.result); got != c.want {
+			t.Errorf("%s: hasArticleText = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestIsChallengeResult(t *testing.T) {
+	// tvinsider as the browser returned it, with a quality score of 45
+	interstitial := models.ScrapeResponse{
+		Title:   "www.tvinsider.com",
+		Content: "Performing security verification\n\nThis website uses a security service to protect against malicious bots. This page is displayed while the website verifies you are not a bot.",
+	}
+	if !isChallengeResult(interstitial) {
+		t.Error("expected the verification interstitial to be recognised")
+	}
+
+	article := models.ScrapeResponse{
+		Title:   "Why sites ask you to verify you are human",
+		Content: strings.Repeat("Bot checks ask visitors to verify you are human before a page loads. ", 20),
+	}
+	if isChallengeResult(article) {
+		t.Error("an article quoting challenge wording is not a challenge")
+	}
+
+	// A block page's text, with no Cloudflare markup left to match
+	block := models.ScrapeResponse{Content: "Sorry, you have been blocked\nCloudflare Ray ID: 8c1f2e3d4a5b6c7d"}
+	if !isChallengeResult(block) {
+		t.Error("expected the block page text to be recognised")
+	}
+	if !isChallengeResult(models.ScrapeResponse{Title: "Just a moment..."}) {
+		t.Error("expected the challenge title to be recognised")
+	}
+}
+
+func TestWithContentFlagAlwaysEmitsContent(t *testing.T) {
+	missing, err := json.Marshal(withContentFlag(models.ScrapeResponse{Title: "Only a title"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"content":""`, `"contentMissing":true`} {
+		if !strings.Contains(string(missing), want) {
+			t.Errorf("expected %s in %s", want, missing)
+		}
+	}
+
+	present, err := json.Marshal(withContentFlag(models.ScrapeResponse{Content: "Body text."}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(present), "contentMissing") {
+		t.Errorf("contentMissing should be omitted when text exists: %s", present)
 	}
 }

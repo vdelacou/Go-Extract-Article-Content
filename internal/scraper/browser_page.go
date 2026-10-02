@@ -317,7 +317,7 @@ func (b *BrowserClient) waitOutCloudflare(ctx context.Context, firstHTML string)
 		return errCloudflarePersisted
 	}
 
-	cfWait := 15 * time.Second
+	cfWait := ChallengeWait
 	if remaining := calculateRemainingTime(ctx); remaining < cfWait+5*time.Second {
 		cfWait = remaining - 5*time.Second
 		if cfWait < 3*time.Second {

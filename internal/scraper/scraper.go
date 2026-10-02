@@ -112,20 +112,21 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 				remainingAfterPhase1 := calculateRemainingTime(ctx)
 				fmt.Printf("Phase 1: HTTP fetch succeeded for %s (HTML size: %d bytes, consumed: %v, remaining: %v)\n", finalURL, len(html), phase1Duration, remainingAfterPhase1)
 				result := s.extractor.ExtractArticleWithMultipleStrategies(html, finalURL)
-				// Verify extraction found at least title or content
-				if len(result.Content) == 0 && len(result.Title) == 0 {
+				switch {
+				case len(result.Content) == 0 && len(result.Title) == 0:
 					fmt.Printf("Phase 1: All extraction strategies returned empty, treating as failure\n")
 					err = fmt.Errorf("content extraction returned empty results")
-				} else {
+				case isChallengeResult(result):
+					fmt.Printf("Phase 1: Page is a bot-check interstitial, treating as failure\n")
+					err = fmt.Errorf("HTTP fetch returned a bot-check page")
+				case needsBrowser(result, html) && calculateRemainingTime(ctx) >= thinPageBrowserBudget:
+					fmt.Printf("Phase 1: Only %d chars of article text (quality=%d), rendering in the browser\n",
+						len(result.Content), result.Quality.Score)
+					phase1Result = &result
+				default:
 					fmt.Printf("Phase 1: Extraction succeeded (strategy worked, title=%d, content=%d)\n",
 						len(result.Title), len(result.Content))
-					if len(result.Content) >= ThinContentChars || !looksClientRendered(html) ||
-						calculateRemainingTime(ctx) < thinPageBrowserBudget {
-						return result, nil
-					}
-					// A title without a body, on a page built in the browser
-					fmt.Printf("Phase 1: Only %d chars of article text on a client-rendered page, trying the browser\n", len(result.Content))
-					phase1Result = &result
+					return withContentFlag(result), nil
 				}
 			}
 		}
@@ -151,7 +152,7 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 	maxBrowserTime := remainingTime - buffer
 	if maxBrowserTime < 1*time.Second {
 		if phase1Result != nil {
-			return *phase1Result, nil
+			return withContentFlag(*phase1Result), nil
 		}
 		return models.ScrapeResponse{}, fmt.Errorf("scraping failed: insufficient time budget for browser phase (remaining: %v)", remainingTime)
 	}
@@ -183,24 +184,31 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 			finalURL, htmlLength, textLength, phase2Duration, remainingAfterPhase2)
 		result := s.extractor.ExtractArticleWithMultipleStrategies(html, finalURL)
 		// Let extraction be the final judge - only reject if both title and content are empty
-		if len(result.Content) == 0 && len(result.Title) == 0 {
+		switch {
+		case len(result.Content) == 0 && len(result.Title) == 0:
 			fmt.Printf("Phase 2: All extraction strategies returned empty (title=%d chars, content=%d chars), treating as failure\n",
 				len(result.Title), len(result.Content))
 			err = fmt.Errorf("content extraction returned empty results")
-		} else {
+		case isChallengeResult(result):
+			// A bot check whose page carries none of Cloudflare's markers
+			fmt.Printf("Phase 2: Browser got a bot-check interstitial instead of the article\n")
+			u, _ := url.Parse(targetURL)
+			err = &models.CloudflareBlockError{Domain: u.Hostname(), Kind: CFChallenge.String(), Err: errors.New("browser returned bot-check text")}
+		default:
 			fmt.Printf("Phase 2: Extraction successful (title=%d chars, content=%d chars, quality score=%d)\n",
 				len(result.Title), len(result.Content), result.Quality.Score)
 			if phase1Result != nil && !browserResultBetter(*phase1Result, result, documentTitle(html)) {
 				fmt.Printf("Phase 2: Result is no better than Phase 1's, keeping Phase 1\n")
-				return *phase1Result, nil
+				return withContentFlag(*phase1Result), nil
 			}
-			return result, nil
+			return withContentFlag(result), nil
 		}
 	}
 
 	if phase1Result != nil {
+		// The page itself loaded: its title and images are worth more to the caller than an error
 		fmt.Printf("Phase 2: Browser scraping failed (%v), keeping Phase 1 result\n", err)
-		return *phase1Result, nil
+		return withContentFlag(*phase1Result), nil
 	}
 
 	remainingAfterPhase2 := calculateRemainingTime(ctx)
@@ -231,13 +239,64 @@ func (s *Scraper) ScrapeSmart(ctx context.Context, targetURL string) (models.Scr
 // for the browser to be worth trying
 const thinPageBrowserBudget = 30 * time.Second
 
+// needsBrowser reports whether a Phase 1 result should be rendered in the
+// browser: it has no article text at all, or only a little on a page built
+// client-side. A short static article is complete as it is
+func needsBrowser(r models.ScrapeResponse, page string) bool {
+	if !hasArticleText(r) {
+		return true
+	}
+	return len(r.Content) < ThinContentChars && looksClientRendered(page)
+}
+
+// hasArticleText reports whether extraction found body text. A page that yields only a
+// title and images renders its article client-side and needs the browser.
+func hasArticleText(r models.ScrapeResponse) bool {
+	return strings.TrimSpace(r.Content) != "" && r.Quality.Score > 0
+}
+
+// interstitialPhrases are the words of bot-check and block pages, Cloudflare's
+// and others', as they come out of extraction
+var interstitialPhrases = []string{
+	"attention required! | cloudflare", "cloudflare ray id", "what can i do to resolve this?",
+	"why have i been blocked?", "performance & security by cloudflare", "verifying you are human",
+	"verify you are human", "checking your browser", "please wait while we verify",
+	"this may take a few seconds", "performing security verification",
+	"enable javascript and cookies to continue",
+}
+
+// isChallengeResult reports whether extraction returned a bot-check interstitial
+// instead of an article, which would otherwise reach callers as a short article.
+// Real articles that quote the same phrases are far longer
+func isChallengeResult(r models.ScrapeResponse) bool {
+	if len(r.Content) >= MaxChallengeContentLen {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Title), "Just a moment...") {
+		return true
+	}
+	return ContainsAny(r.Title+"\n"+r.Content, interstitialPhrases)
+}
+
+// withContentFlag marks a result whose article text is missing, so callers need not
+// infer it from an empty content field.
+func withContentFlag(r models.ScrapeResponse) models.ScrapeResponse {
+	r.ContentMissing = strings.TrimSpace(r.Content) == ""
+	return r
+}
+
 // browserResultBetter reports whether the browser found the body Phase 1 missed:
-// clearly more text, under a title about the same story. A different title means
-// the browser got an error, 404 or interstitial page. The browser document's own
-// <title> counts too: client-rendered pages often serve the site name as the
-// title and set the headline in the browser
+// article text where Phase 1 had none, or clearly more of it, under a title about
+// the same story. A different title means the browser got an error, 404 or
+// interstitial page. The browser document's own <title> counts too:
+// client-rendered pages often serve the site name as the title and set the
+// headline in the browser
 func browserResultBetter(phase1, browser models.ScrapeResponse, browserDocTitle string) bool {
-	if len(browser.Content) < ThinContentChars || len(browser.Content) < 2*len(phase1.Content) {
+	if !hasArticleText(browser) {
+		return false
+	}
+	if n := len(strings.TrimSpace(phase1.Content)); n > 0 &&
+		(len(browser.Content) < ThinContentChars || len(browser.Content) < 2*n) {
 		return false
 	}
 	return titleOverlap(phase1.Title, browser.Title) >= 0.5 || titleOverlap(phase1.Title, browserDocTitle) >= 0.5
@@ -246,7 +305,7 @@ func browserResultBetter(phase1, browser models.ScrapeResponse, browserDocTitle 
 var (
 	titleTagRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
 	// Markers of pages whose article is built in the browser
-	clientAppMarkers = []string{"__remixContext", "__reactRouterContext", "__NEXT_DATA__", "self.__next_f", "window.__NUXT__", "ng-version="}
+	clientAppMarkers = []string{"__remixContext", "__reactRouterContext", "__NEXT_DATA__", "self.__next_f", "window.__NUXT__", "ng-version=", "<astro-island", "__sveltekit"}
 	emptyMountRe     = regexp.MustCompile(`(?i)<div[^>]+id=["'](?:root|app|__next|__nuxt|svelte)["'][^>]*>\s*</div>`)
 )
 

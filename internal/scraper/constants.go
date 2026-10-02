@@ -8,7 +8,12 @@ const (
 	HTTPTimeout    = 12 * time.Second  // Reduced from 18s - SCMP blocks HTTP anyway
 	BrowserTimeout = 60 * time.Second  // Increased from 40s - SCMP needs more time
 	DefaultTimeout = 15 * time.Second
+	ChallengeWait  = 8 * time.Second   // Headless Chrome rarely clears a bot challenge; give up after this
 )
+
+// MaxChallengeContentLen is the longest extracted text still taken for a bot-check
+// interstitial. Real articles that quote the same phrases are far longer.
+const MaxChallengeContentLen = 1000
 
 // Content extraction selectors
 const (
