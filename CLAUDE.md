@@ -39,7 +39,7 @@ docker run -p 8080:8080 extract-html-scraper
 # Set your Google Cloud project
 export GOOGLE_CLOUD_PROJECT="your-project-id"
 
-# Deploy to Cloud Run (builds and deploys)
+# Deploy to Cloud Run (builds gcr.io/$GOOGLE_CLOUD_PROJECT/extract-html-scraper:<commit>, then deploys that tag)
 ./deploy.sh
 
 # Manage API keys
@@ -159,9 +159,17 @@ Images are extracted with a scoring algorithm that prioritizes:
 
 - API keys are validated in `cmd/cloudrun/main.go:90-107` using constant-time comparison to prevent timing attacks
 - If no keys are configured, the service allows all requests (development mode)
-- Keys can be loaded from:
-  - Environment variable: `SCRAPER_API_KEYS` (comma-separated)
-  - Google Secret Manager: `SCRAPER_API_KEY_SECRET` (not yet implemented, returns error)
+- Keys are read from `SCRAPER_API_KEYS` (comma-separated), set either way:
+  - As a plain environment variable: `manage-api-keys.sh set-env` (`gcloud run services update --update-env-vars`)
+  - From Google Secret Manager: `manage-api-keys.sh set-secret` stores the keys in the `scraper-api-keys` secret and has Cloud Run mount it as `SCRAPER_API_KEYS` (`--update-secrets`), so no Go code reads Secret Manager
+- `SCRAPER_API_KEY_SECRET` is not implemented: `loadKeysFromSecretManager` always errors and the service falls back to `SCRAPER_API_KEYS`. Older versions of `manage-api-keys.sh` set it, and `set-secret` now removes it
+- Change the service with `--update-env-vars` and `--update-secrets`, not the `--set-*` forms: those replace every variable or secret, and dropping `SCRAPER_API_KEYS` leaves the service open
+
+### Deploy Script
+
+- `deploy.sh` runs under bash with `set -euo pipefail` and re-executes itself with bash when started as `sh deploy.sh` or `zsh deploy.sh`
+- A failed `gcloud builds submit` stops the script before `gcloud run deploy`
+- The image is tagged with the short commit SHA (plus `-dirty-<timestamp>` when the tree has uncommitted changes) and that tag is deployed, so a deploy never picks up an older `:latest`. `cloudbuild.yaml` takes it as `_TAG` and also pushes `:latest`
 
 ### Response Text
 
@@ -205,7 +213,7 @@ From `.cursor/rules/snyk_rules.mdc`:
 - Repeat until no new issues are found
 
 **Additional security considerations:**
-- Never commit API keys or sensitive data to version control (see deploy.sh:14)
+- Never commit API keys or sensitive data to version control (see deploy.sh:19)
 - Use Secret Manager for production API keys
 - API keys validated with constant-time comparison (main.go:101)
 - CORS headers set appropriately (main.go:113-115)
@@ -215,8 +223,8 @@ From `.cursor/rules/snyk_rules.mdc`:
 
 **Cloud Run Service:**
 - `PORT` - Server port (default: 8080)
-- `SCRAPER_API_KEYS` - Comma-separated API keys (for env-based auth)
-- `SCRAPER_API_KEY_SECRET` - Secret Manager secret name (for Secret Manager auth)
+- `SCRAPER_API_KEYS` - Comma-separated API keys, set directly or mounted from Secret Manager
+- `SCRAPER_API_KEY_SECRET` - Not implemented (see API Key Authentication); the service falls back to `SCRAPER_API_KEYS`
 - `SCRAPE_USER_AGENT` - Custom user agent string (optional)
 - `CHROME_BIN` - Chrome binary path (`/usr/bin/chromium-browser` in the container, found on PATH otherwise). The scraper runs this binary and reads its version at startup.
 - `CHROME_MAJOR` - Chrome major version for the user agent, used only when no browser is found (default: 152). Otherwise the user agent names the installed version, on Linux: `Chrome/<major>.0.0.0`

@@ -155,9 +155,8 @@ Images are extracted with a scoring algorithm that prioritizes:
 
 - API keys are validated in `cmd/cloudrun/main.go:90-107` using constant-time comparison to prevent timing attacks
 - If no keys are configured, the service allows all requests (development mode)
-- Keys can be loaded from:
-  - Environment variable: `SCRAPER_API_KEYS` (comma-separated)
-  - Google Secret Manager: `SCRAPER_API_KEY_SECRET` (not yet implemented, returns error)
+- Keys are read from `SCRAPER_API_KEYS` (comma-separated), set as a plain environment variable (`manage-api-keys.sh set-env`) or mounted from Google Secret Manager (`manage-api-keys.sh set-secret`)
+- `SCRAPER_API_KEY_SECRET` is not implemented: `loadKeysFromSecretManager` always errors and the service falls back to `SCRAPER_API_KEYS`
 
 ### Error Handling
 
@@ -197,7 +196,7 @@ From `.cursor/rules/snyk_rules.mdc`:
 - Repeat until no new issues are found
 
 **Additional security considerations:**
-- Never commit API keys or sensitive data to version control (see deploy.sh:14)
+- Never commit API keys or sensitive data to version control (see deploy.sh:19)
 - Use Secret Manager for production API keys
 - API keys validated with constant-time comparison (main.go:101)
 - CORS headers set appropriately (main.go:113-115)
@@ -208,7 +207,7 @@ From `.cursor/rules/snyk_rules.mdc`:
 **Cloud Run Service:**
 - `PORT` - Server port (default: 8080)
 - `SCRAPER_API_KEYS` - Comma-separated API keys (for env-based auth)
-- `SCRAPER_API_KEY_SECRET` - Secret Manager secret name (for Secret Manager auth)
+- `SCRAPER_API_KEY_SECRET` - Not implemented; the service falls back to `SCRAPER_API_KEYS`
 - `SCRAPE_USER_AGENT` - Custom user agent string (optional)
 - `CHROME_BIN` - Chrome binary path (`/usr/bin/chromium-browser` in the container, found on PATH otherwise). The scraper runs this binary and reads its version at startup.
 - `CHROME_MAJOR` - Chrome major version for the user agent, used only when no browser is found (default: 152). Otherwise the user agent names the installed version, on Linux: `Chrome/<major>.0.0.0`
