@@ -97,7 +97,8 @@ Manage API keys using the provided script:
 - Supports multiple keys (comma-separated)
 - Keys can be stored in:
   1. Environment variable `SCRAPER_API_KEYS` (simple)
-  2. Google Secret Manager (recommended for production)
+  2. Google Secret Manager (recommended for production): `set-secret` stores them in the `scraper-api-keys` secret and Cloud Run mounts it as `SCRAPER_API_KEYS`
+- With no keys configured, the service accepts every request
 - Uses constant-time comparison to prevent timing attacks
 
 ### Response Format
@@ -157,8 +158,8 @@ Manage API keys using the provided script:
 - `SCRAPE_USER_AGENT` - Custom user agent (optional)
 - `CHROME_BIN` - Chrome binary path (auto-configured)
 - `PORT` - Server port (default: 8080)
-- `SCRAPER_API_KEYS` - Comma-separated list of valid API keys (optional, if not using Secret Manager)
-- `SCRAPER_API_KEY_SECRET` - Google Secret Manager secret name containing API keys (optional, preferred for production)
+- `SCRAPER_API_KEYS` - Comma-separated list of valid API keys, set directly or mounted from Secret Manager (optional)
+- `SCRAPER_API_KEY_SECRET` - Not implemented: the service can't read Secret Manager itself and falls back to `SCRAPER_API_KEYS`. Mount the secret as `SCRAPER_API_KEYS` instead
 
 **For Deployment Script:**
 - `GOOGLE_CLOUD_PROJECT` - Your GCP project ID (required)
@@ -326,7 +327,7 @@ Enable debug logging by setting environment variable in Cloud Run:
 
 ```bash
 gcloud run services update extract-html-scraper \
-  --set-env-vars="DEBUG=true" \
+  --update-env-vars="DEBUG=true" \
   --region=us-central1
 ```
 

@@ -1,5 +1,14 @@
+# deploy.sh passes _TAG (the commit SHA) and deploys that tag.
+# :latest is also pushed, for anyone pulling the image by name.
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-f', 'Dockerfile', '-t', 'gcr.io/${_PROJECT_ID}/extract-html-scraper', '.']
+    args: ['build', '-f', 'Dockerfile',
+           '-t', 'gcr.io/${_PROJECT_ID}/extract-html-scraper:${_TAG}',
+           '-t', 'gcr.io/${_PROJECT_ID}/extract-html-scraper:latest',
+           '.']
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/${_PROJECT_ID}/extract-html-scraper']
+    args: ['push', 'gcr.io/${_PROJECT_ID}/extract-html-scraper:${_TAG}']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/${_PROJECT_ID}/extract-html-scraper:latest']
+substitutions:
+  _TAG: latest
