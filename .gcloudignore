@@ -1,15 +1,11 @@
-# Explicitly include important directories
-# Cloud Build will respect .gitignore by default
-# This file ensures critical build directories are NOT excluded
+# Files gcloud leaves out of the Cloud Build upload. While this file exists,
+# gcloud skips .gitignore unless it is included, so include it here
+#!include:.gitignore
 
-# DO NOT ignore these patterns (use negation)
-# The default behavior already includes tracked files
-# This file is mainly a safeguard
+# .gitignore's bare "cloudrun", meant for the local binary, also matches the
+# cmd/cloudrun source directory that the Docker build compiles
+!cmd/cloudrun/
 
-# Only explicitly exclude truly unnecessary files for build
-.DS_Store
-*.swp
-*.swo
-.vscode/
-.idea/
-
+# Git history, and local settings that only a global gitignore excludes
+.git/
+.claude/
