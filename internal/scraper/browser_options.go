@@ -2,6 +2,8 @@
 package scraper
 
 import (
+	"extract-html-scraper/internal/config"
+
 	"github.com/chromedp/chromedp"
 )
 
@@ -83,6 +85,11 @@ func BuildChromeOptions(opts BrowserOptions) []chromedp.ExecAllocatorOption {
 		chromedp.Flag("password-store", "basic"),
 		chromedp.Flag("use-mock-keychain", true),
 	)
+
+	// Run the browser whose version the user agent names
+	if bin := config.ChromeBinary(); bin != "" {
+		chromeOpts = append(chromeOpts, chromedp.ExecPath(bin))
+	}
 
 	// Add user agent if provided
 	if opts.UserAgent != "" {

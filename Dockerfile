@@ -22,10 +22,12 @@ RUN ls -la /app/cmd/cloudrun/ || (echo "ERROR: cmd/cloudrun not found" && ls -la
 # Build the Go binary with size optimization
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o main ./cmd/cloudrun
 
-# Stage 2: Runtime with Chrome
-FROM alpine:3.18
+# Stage 2: Runtime with Chrome. Alpine 3.24 ships Chromium 152; 3.18 shipped
+# Chromium 119, from 2023. The scraper reads the version at startup and puts
+# it in its user agent
+FROM alpine:3.24
 
-# Install Chrome dependencies
+# Install Chrome dependencies (ttf-freefont is now font-freefont)
 RUN apk add --no-cache \
     chromium \
     nss \
@@ -33,7 +35,7 @@ RUN apk add --no-cache \
     freetype-dev \
     harfbuzz \
     ca-certificates \
-    ttf-freefont \
+    font-freefont \
     wget \
     unzip
 

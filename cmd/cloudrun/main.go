@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"extract-html-scraper/internal/config"
 	"extract-html-scraper/internal/models"
 	"extract-html-scraper/internal/scraper"
 )
@@ -303,6 +304,7 @@ func main() {
 	}
 
 	fmt.Printf("Starting server on port %s\n", port)
+	fmt.Printf("Browser: %s, user agent: %s\n", config.ChromeBinary(), config.DefaultScrapeConfig().UserAgent)
 	http.HandleFunc("/", handler.Handler)
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {

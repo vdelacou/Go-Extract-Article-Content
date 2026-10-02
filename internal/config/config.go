@@ -3,7 +3,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"regexp"
 	"strconv"
@@ -54,16 +53,22 @@ func DefaultImageConfig() ImageConfig {
 
 // DefaultScrapeConfig returns the default scraping configuration
 func DefaultScrapeConfig() ScrapeConfig {
-	chromeMajor := 133
-	if env := os.Getenv("CHROME_MAJOR"); env != "" {
-		if parsed, err := strconv.Atoi(env); err == nil {
-			chromeMajor = parsed
+	// Claim the browser that is actually installed: a user agent whose version
+	// and platform disagree with what Chrome reports in its client hints is a
+	// bot signal. CHROME_MAJOR only applies when there is no browser to ask
+	chromeMajor := InstalledChromeMajor()
+	if chromeMajor == 0 {
+		chromeMajor = fallbackChromeMajor
+		if env := os.Getenv("CHROME_MAJOR"); env != "" {
+			if parsed, err := strconv.Atoi(env); err == nil {
+				chromeMajor = parsed
+			}
 		}
 	}
 
 	userAgent := os.Getenv("SCRAPE_USER_AGENT")
 	if userAgent == "" {
-		userAgent = fmt.Sprintf("Mozilla/5.0 (Windows NT 10; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.6943.126 Safari/537.36", chromeMajor)
+		userAgent = ChromeUserAgent(chromeMajor)
 	}
 
 	return ScrapeConfig{

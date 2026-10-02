@@ -210,8 +210,8 @@ From `.cursor/rules/snyk_rules.mdc`:
 - `SCRAPER_API_KEYS` - Comma-separated API keys (for env-based auth)
 - `SCRAPER_API_KEY_SECRET` - Secret Manager secret name (for Secret Manager auth)
 - `SCRAPE_USER_AGENT` - Custom user agent string (optional)
-- `CHROME_BIN` - Chrome binary path (auto-detected in container)
-- `CHROME_MAJOR` - Chrome major version for user agent (default: 133)
+- `CHROME_BIN` - Chrome binary path (`/usr/bin/chromium-browser` in the container, found on PATH otherwise). The scraper runs this binary and reads its version at startup.
+- `CHROME_MAJOR` - Chrome major version for the user agent, used only when no browser is found (default: 152). Otherwise the user agent names the installed version, on Linux: `Chrome/<major>.0.0.0`
 - `VERBOSE_ERRORS` - Set to "true" for detailed error messages
 - `DEBUG` - Set to "true" for debug mode
 
