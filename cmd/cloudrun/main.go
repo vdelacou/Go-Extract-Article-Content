@@ -145,7 +145,7 @@ func (h *CloudRunHandler) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate URL format
-	if _, err := url.Parse(targetURL); err != nil {
+	if !isHTTPURL(targetURL) {
 		h.errorResponse(w, http.StatusBadRequest, "Invalid URL format")
 		return
 	}
@@ -292,6 +292,16 @@ func (h *CloudRunHandler) errorResponse(w http.ResponseWriter, statusCode int, m
 
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(errorResp)
+}
+
+// isHTTPURL reports whether raw is an absolute http(s) URL with a host. url.Parse
+// alone accepts relative strings such as "undefined", which then fail slowly as a 500
+func isHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != ""
 }
 
 // main function
