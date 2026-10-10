@@ -2,10 +2,6 @@
 # gcloud skips .gitignore unless it is included, so include it here
 #!include:.gitignore
 
-# .gitignore's bare "cloudrun", meant for the local binary, also matches the
-# cmd/cloudrun source directory that the Docker build compiles
-!cmd/cloudrun/
-
 # Git history, and local settings that only a global gitignore excludes
 .git/
 .claude/
