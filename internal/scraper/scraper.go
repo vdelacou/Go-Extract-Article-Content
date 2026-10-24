@@ -263,6 +263,8 @@ var interstitialPhrases = []string{
 	"verify you are human", "checking your browser", "please wait while we verify",
 	"this may take a few seconds", "performing security verification",
 	"enable javascript and cookies to continue",
+	// technode.com's check, which datacenter addresses get instead of the article
+	"confirm you are human", "check you're not a robot", "check you’re not a robot",
 }
 
 // isChallengeResult reports whether extraction returned a bot-check interstitial
