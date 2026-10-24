@@ -294,6 +294,19 @@ func TestIsChallengeResult(t *testing.T) {
 	if !isChallengeResult(models.ScrapeResponse{Title: "Just a moment..."}) {
 		t.Error("expected the challenge title to be recognised")
 	}
+
+	// technode.com as the browser returned it from Cloud Run, a 200 the caller
+	// logged as an article with no images
+	robotCheck := models.ScrapeResponse{
+		Title:   "Confirm you are human",
+		Content: "We need to check you're not a robot before you can enter this site.",
+	}
+	if !isChallengeResult(robotCheck) {
+		t.Error("expected the robot check to be recognised")
+	}
+	if !isChallengeResult(models.ScrapeResponse{Content: "We need to check you’re not a robot before you can enter this site."}) {
+		t.Error("expected the robot check to be recognised with a curly apostrophe")
+	}
 }
 
 func TestWithContentFlagAlwaysEmitsContent(t *testing.T) {
