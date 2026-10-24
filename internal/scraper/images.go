@@ -43,7 +43,7 @@ func (ie *ImageExtractor) ExtractImagesFromHTML(html, baseURL string) []models.I
 	ie.preprocessHTML(doc)
 
 	// Extract candidates concurrently
-	candidatesChan := make(chan []models.ImageCandidate, 3)
+	candidatesChan := make(chan []models.ImageCandidate, 4)
 	var wg sync.WaitGroup
 
 	// Extract og:image concurrently
@@ -65,6 +65,17 @@ func (ie *ImageExtractor) ExtractImagesFromHTML(html, baseURL string) []models.I
 		jsonldImage := ie.extractJSONLDImage(doc, baseURL)
 		if jsonldImage != nil {
 			candidatesChan <- []models.ImageCandidate{*jsonldImage}
+		} else {
+			candidatesChan <- []models.ImageCandidate{}
+		}
+	}()
+
+	// Extract the WordPress post thumbnail concurrently
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if featured := ie.extractFeaturedImage(doc, baseURL); featured != nil {
+			candidatesChan <- []models.ImageCandidate{*featured}
 		} else {
 			candidatesChan <- []models.ImageCandidate{}
 		}
@@ -124,8 +135,12 @@ func (ie *ImageExtractor) preprocessHTML(doc *goquery.Document) {
 		".lg\\:col-span-1",
 	}
 
+	// Class substrings also hit page wrappers: WordPress themes put has-sidebar on
+	// <body>. Never remove the page itself or anything holding the article
 	for _, selector := range selectors {
-		doc.Find(selector).Remove()
+		doc.Find(selector).FilterFunction(func(i int, s *goquery.Selection) bool {
+			return !s.Is("html, body, main, article") && s.Find("main, article").Length() == 0
+		}).Remove()
 	}
 
 	// Preserve headers that are part of article/main content while removing site-level chrome
@@ -182,6 +197,23 @@ func (ie *ImageExtractor) extractJSONLDImage(doc *goquery.Document, baseURL stri
 		BadHint:   false,
 		Source:    "jsonld",
 	}
+}
+
+// extractFeaturedImage takes WordPress's post thumbnail, which themes often render
+// above the article element and inside wrappers named featured-image, so the
+// article-scope scan never reaches it. technode.com's og:image is only its logo
+func (ie *ImageExtractor) extractFeaturedImage(doc *goquery.Document, baseURL string) *models.ImageCandidate {
+	img := doc.Find("main .post-thumbnail img.wp-post-image, article .post-thumbnail img.wp-post-image").First()
+	if img.Length() == 0 {
+		return nil
+	}
+	candidate := ie.extractImgTag(img, baseURL)
+	if candidate == nil {
+		return nil
+	}
+	candidate.InArticle = true
+	candidate.Source = "featured"
+	return candidate
 }
 
 // extractOgImage extracts Open Graph image metadata

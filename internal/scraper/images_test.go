@@ -144,6 +144,38 @@ func TestExtractImagesFromHTMLAcceptsUpperCaseExtension(t *testing.T) {
 	}
 }
 
+func TestExtractImagesFromHTMLSurvivesSidebarClassOnBody(t *testing.T) {
+	// technode.com: WordPress themes put has-sidebar on <body>, which the
+	// sidebar cleanup used to match, removing the whole page
+	coverURL := "https://i0.wp.com/technode.com/wp-content/uploads/2026/10/cn-cover-371033.jpg"
+	html := `
+		<html><head>
+		<meta property="og:image" content="https://i0.wp.com/technode.com/wp-content/uploads/2021/08/technode-news-feed-1-1.png" />
+		<meta property="og:image:width" content="540" />
+		<meta property="og:image:height" content="540" />
+		</head><body class="single single-post has-sidebar">
+		<div id="page" class="site"><main id="main" class="site-main">
+			<div class="featured-image-behind"><figure class="post-thumbnail">
+				<img width="2000" height="1125" src="` + coverURL + `" class="attachment-newspack-featured-image-large wp-post-image" />
+			</figure></div>
+			<article><p>XREAL has announced a starting price of $1,279 for its AURA glasses.</p></article>
+		</main>
+		<aside class="sidebar"><img src="https://i0.wp.com/technode.com/ad.jpg" width="600" height="400" /></aside>
+		</div></body></html>
+	`
+
+	images := NewImageExtractor().ExtractImagesFromHTML(html, "https://technode.com/2026/10/09/xreal-opens-aura-preorders-at-1279-for-android-xr-glasses/")
+
+	if len(images) == 0 || images[0].URL != coverURL {
+		t.Fatalf("expected the featured image %s first, got %v", coverURL, images)
+	}
+	for _, img := range images {
+		if strings.Contains(img.URL, "ad.jpg") {
+			t.Errorf("the sidebar image should still be removed, got %v", images)
+		}
+	}
+}
+
 func TestBadHintMatchesAdTermsOnlyAsTokens(t *testing.T) {
 	cases := []struct {
 		url  string
